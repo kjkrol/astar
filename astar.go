@@ -84,7 +84,8 @@ func (a *Solver[T]) Solve(from, to T, transitions Transitions[T]) []T {
 }
 
 // Iter yields false while searching and true once the 'to' state is reached.
-// The sequence terminates immediately after reaching the target.
+// The sequence terminates immediately after reaching the target, or ends
+// without ever yielding true if 'to' is unreachable — Result then returns nil.
 func (a *Solver[T]) Iter(from, to T, transitions Transitions[T]) iter.Seq[bool] {
 	a.reset()
 	a.open.insert(from, nil, 0, a.heuristic(from, to))
@@ -93,6 +94,7 @@ func (a *Solver[T]) Iter(from, to T, transitions Transitions[T]) iter.Seq[bool] 
 		for {
 			node, ok := a.open.pop()
 			if !ok {
+				a.current = nil
 				return
 			}
 			a.current = node

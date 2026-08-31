@@ -61,3 +61,33 @@ func verifyPath(t *testing.T, path []Point, start, to Point) {
 		t.Errorf("path ends at %v, expected %v", path[len(path)-1], to)
 	}
 }
+
+// TestSolver_UnreachableTarget guards Solve's documented contract ("returns
+// the full sequence of states, or nil if no solution exists") for a target
+// walled off on every side — both through Solve directly and through the
+// lower-level Iter+Result path it's built on.
+func TestSolver_UnreachableTarget(t *testing.T) {
+	grid := [][]float64{
+		{1, InsurmountableObstacle, 1},
+		{InsurmountableObstacle, 1, InsurmountableObstacle},
+		{1, InsurmountableObstacle, 1},
+	}
+	start, to := Point{X: 0, Y: 0}, Point{X: 1, Y: 1}
+
+	t.Run("Solve", func(t *testing.T) {
+		pathFinder := setupPathFinder()
+		path := pathFinder.Solve(start, to, setupTransitions(1.0, grid))
+		if path != nil {
+			t.Fatalf("expected nil for an unreachable target, got %v", path)
+		}
+	})
+
+	t.Run("Iter", func(t *testing.T) {
+		pathFinder := setupPathFinder()
+		for range pathFinder.Iter(start, to, setupTransitions(1.0, grid)) {
+		}
+		if path := pathFinder.Result(); path != nil {
+			t.Fatalf("expected nil for an unreachable target, got %v", path)
+		}
+	})
+}
