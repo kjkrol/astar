@@ -118,7 +118,11 @@ func (a *Solver[T]) expandCurrent(to T, transitions Transitions[T]) {
 	if a.current.Parent != nil {
 		parentID = a.current.Parent.ID
 	}
-	for _, transition := range transitions(a.current.ID, parentID, a.transitionBuf[:0]) {
+	successors := transitions(a.current.ID, parentID, a.transitionBuf[:0])
+	if cap(successors) > cap(a.transitionBuf) {
+		a.transitionBuf = successors[:0]
+	}
+	for _, transition := range successors {
 		G := a.current.G + transition.Cost
 		F := G + a.heuristic(transition.To, to)
 

@@ -21,6 +21,7 @@ func WithInitCapacity[T comparable](capacity int) SolverOption[T] {
 // internal "open" and "closed" sets. Because the underlying slice does not grow dynamically,
 // the provided maxSize must represent the absolute maximum number of possible states (nodes).
 // It also requires an Indexer function to map node properties to contiguous integer indices.
+// Starting a search does not touch the slice, so it costs the same whatever maxSize is.
 //
 // This is the fastest dictionary implementation available, typically doubling the solver's
 // overall performance by completely eliminating map hashing overhead and reducing memory allocations.
