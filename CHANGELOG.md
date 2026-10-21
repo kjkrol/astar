@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [v1.1.2]
 
+### Added
+
+- `Solver.SolveInto(dst, from, to, transitions)` and `Solver.ResultInto(dst)`: the path written
+  over the caller's `dst`, grown only when shorter than the path (`dst` emptied when no path
+  exists), so a search reusing its buffer allocates nothing for its result.
+
 ### Changed
+
+- `Solve` and `SolveInto` run the search without `Iter`'s range-over-func, and `Result` sizes the
+  path once instead of growing it by `append`: `Solve` across 64×64 allocates once instead of 11
+  times (256×256: once instead of 13); `SolveInto` into a buffer big enough, not at all.
 
 - `WithIndexedSliceDict`: a new search no longer clears the dictionaries' slices. Each slot
   carries the stamp of the search that wrote it, so a reset is O(1) whatever `maxSize` (the
