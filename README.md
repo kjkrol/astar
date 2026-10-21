@@ -40,32 +40,45 @@ go get github.com/kjkrol/goke
 This solver is built for extreme performance. By utilizing Go 1.18+ Generics, custom memory arenas, and highly optimized data structures, we drastically reduce memory allocations and prevent heap escapes during the hot path of the search.
 
 **Key Optimizations:**
-* **`WithIndexedSliceDict`:** Replaces standard Go maps with a pre-allocated slice for tracking visited nodes. It completely eliminates hashing overhead and interface boxing.
+* **`WithIndexedSliceDict`:** Replaces standard Go maps with a pre-allocated slice for tracking visited nodes. It completely eliminates hashing overhead and interface boxing. Each slot carries the stamp of the search that wrote it, so a new search resets the dictionary in O(1) instead of clearing `maxSize` slots.
 * **Node Arena:** An internal chunk-based memory arena ensures that millions of nodes can be processed with near-zero allocations after the initial setup.
+* **`SolveInto`:** Writes the path into the caller's buffer; a search reusing its buffer allocates nothing.
 
-## Benchmarks (Apple M1 Max)
+## Benchmarks (Intel Core i5-8265U, Linux)
 
-The benchmarks below represent execution metrics under standard A* operational stress (`CostWeight_1.0`), where the algorithm fully evaluates path costs and alternative routes. 
+The first table represents execution metrics under standard A* operational stress (`CostWeight_1.0`), where the algorithm fully evaluates path costs and alternative routes. Medians of 5 runs of `go test -run '^$' -bench 'Solve/./CostWeight_(1.0|0.1)' -benchmem`.
 
-As the state space expands, the `IndexedSliceDict` provides massive scaling advantages over map-based lookups. For a large **2048x2048** environment, it reduces execution time from **1.41 seconds down to just 0.54 seconds**—outperforming the standard Go map implementation by **2.6x**.
+As the state space expands, the `IndexedSliceDict` provides massive scaling advantages over map-based lookups. For a large **2048x2048** environment, it reduces execution time from **2.63 seconds down to just 0.84 seconds**—outperforming the standard Go map implementation by **3.1x**.
 
 | Grid Size | Dictionary Type | Time (ms/op) | Memory (kB/op) | Allocs (allocs/op) |
 | :--- | :--- | :--- | :--- | :--- |
-| **64x64** | `IndexedSliceDict` | 0.36 ms | 4.2 kB | 12 |
-| | `IndexedMapDict` | 0.58 ms | 4.1 kB | 12 |
-| | `DefaultMapDict` | 0.62 ms | 4.1 kB | 12 |
-| **256x256** | `IndexedSliceDict` | 6.85 ms | 33.2 kB | 14 |
-| | `IndexedMapDict` | 10.98 ms | 16.2 kB | 14 |
-| | `DefaultMapDict` | 11.94 ms | 16.3 kB | 14 |
-| **512x512** | `IndexedSliceDict` | 30.15 ms | 388.3 kB | 16 |
-| | `IndexedMapDict` | 59.11 ms | 49.8 kB | 16 |
-| | `DefaultMapDict` | 60.11 ms | 49.8 kB | 16 |
-| **1024x1024** | `IndexedSliceDict` | 126.10 ms | 6,253.1 kB | 21 |
-| | `IndexedMapDict` | 288.12 ms | 124.6 kB | 21 |
-| | `DefaultMapDict` | 308.14 ms | 124.7 kB | 21 |
-| **2048x2048** | `IndexedSliceDict` | **541.76 ms** | 98,545.3 kB | **34** |
-| | `IndexedMapDict` | 1,411.57 ms | 324.5 kB | 34 |
-| | `DefaultMapDict` | 1,416.12 ms | 324.5 kB | 34 |
+| **64x64** | `IndexedSliceDict` | 0.58 ms | 2.0 kB | 1 |
+| | `IndexedMapDict` | 0.95 ms | 2.0 kB | 1 |
+| | `DefaultMapDict` | 1.14 ms | 2.0 kB | 1 |
+| **256x256** | `IndexedSliceDict` | 11.58 ms | 8.3 kB | 1 |
+| | `IndexedMapDict` | 20.93 ms | 8.4 kB | 1 |
+| | `DefaultMapDict` | 26.12 ms | 8.4 kB | 1 |
+| **512x512** | `IndexedSliceDict` | 49.23 ms | 16.8 kB | 1 |
+| | `IndexedMapDict` | 99.01 ms | 17.2 kB | 1 |
+| | `DefaultMapDict` | 125.66 ms | 17.6 kB | 2 |
+| **1024x1024** | `IndexedSliceDict` | 200.94 ms | 37.7 kB | 3 |
+| | `IndexedMapDict` | 425.39 ms | 42.7 kB | 5 |
+| | `DefaultMapDict` | 569.21 ms | 47.7 kB | 7 |
+| **2048x2048** | `IndexedSliceDict` | **837.99 ms** | 101.9 kB | **8** |
+| | `IndexedMapDict` | 1,916.42 ms | 138.4 kB | 15 |
+| | `DefaultMapDict` | 2,632.21 ms | 138.4 kB | 15 |
+
+Memory and allocations are per search, on a solver sized by `WithInitCapacity`: mostly the returned path, which `SolveInto` with a reused buffer spares. The dictionaries are allocated once, by `New`: `IndexedSliceDict` holds two slices of `maxSize` slots, 16 bytes each (2048x2048: 128 MiB).
+
+A short search (`CostWeight_0.1`, the heuristic dominating) visits few nodes, so on a large grid the O(1) reset of `IndexedSliceDict` matters most. Each allocates once, for the path.
+
+| Grid Size | `IndexedSliceDict` | `IndexedMapDict` | `DefaultMapDict` |
+| :--- | :--- | :--- | :--- |
+| **64x64** | 0.04 ms | 0.06 ms | 0.08 ms |
+| **256x256** | 0.19 ms | 0.40 ms | 0.49 ms |
+| **512x512** | 0.45 ms | 1.78 ms | 2.19 ms |
+| **1024x1024** | 0.99 ms | 5.10 ms | 5.84 ms |
+| **2048x2048** | **2.17 ms** | 12.57 ms | 14.21 ms |
 
 ---
 
