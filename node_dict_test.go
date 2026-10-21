@@ -18,7 +18,7 @@ func TestIndexedSliceDict_ClearLeavesSlotsBe(t *testing.T) {
 		if n, ok := d.get(i); ok || n != nil {
 			t.Fatalf("slot %d after clear: got %v, %v; want nil, false", i, n, ok)
 		}
-		if i != 3 && d.slots[i].node != &nodes[i] {
+		if i != 3 && d.nodes[i] != &nodes[i] {
 			t.Fatalf("clear wrote slot %d; it should only move the stamp on", i)
 		}
 	}
@@ -37,14 +37,14 @@ func TestIndexedSliceDict_StampWraps(t *testing.T) {
 	d := newIndexedSliceDict[int](4, func(i int) int { return i })
 	var early, late node[int]
 	d.set(0, &early)
-	d.stamp = math.MaxUint32
+	d.stamp = math.MaxUint8
 	d.set(1, &late)
 	d.clear()
 
 	if d.stamp != 1 {
 		t.Fatalf("stamp after wrapping: got %d, want 1", d.stamp)
 	}
-	// slot 0 still carried stamp 1: only wiping the slots keeps it from coming back
+	// slot 0 still carried stamp 1: only wiping the stamps keeps it from coming back
 	for i := range 2 {
 		if n, ok := d.get(i); ok || n != nil {
 			t.Fatalf("slot %d after the stamp wrapped: got %v, %v; want nil, false", i, n, ok)
