@@ -19,11 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   path once instead of growing it by `append`: `Solve` across 64×64 allocates once instead of 11
   times (256×256: once instead of 13); `SolveInto` into a buffer big enough, not at all.
 
-- `WithIndexedSliceDict`: a new search no longer clears the dictionaries' slices. Each slot
-  carries the stamp of the search that wrote it, so a reset is O(1) whatever `maxSize` (the
-  slots are wiped once in 2^32 searches, when the stamp wraps); a slot takes 16 bytes instead of
-  8. A short search on a large grid is much faster (2048×2048, cost weight 0.1: 4.48 → 2.08 ms),
-  a long one 4–10% slower (each read checks the stamp; 256×256, weight 1.0: 9.55 → 10.33 ms).
+- `WithIndexedSliceDict`: a new search no longer clears the dictionaries' slices. A byte beside
+  each slot holds the stamp of the search that wrote it, so a reset moves the stamp on whatever
+  `maxSize`; the stamps are wiped once every 255 searches, when the stamp wraps. A slot takes 9
+  bytes instead of 8. A search visiting few nodes on a large grid is much faster (2048×2048, cost
+  weight 0.1: 5.33 → 2.20 ms), one visiting many within the noise to 5% slower (each read checks
+  the stamp; 64×64, weight 1.0: 555 → 582 µs).
 - The solver keeps the transitions buffer `Transitions` returns when it outgrew its own, so
   without `WithSuccessorCapacity` retrieving successors stops allocating once the buffer has
   grown; a `nil` or smaller result leaves it as it was.
