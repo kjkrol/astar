@@ -49,40 +49,37 @@ func (d *indexedMapDict[T]) clear()                    { clear(d.m) }
 // Slice-based Node Dictionary (for fixed-size, integer-indexable IDs)
 // ---------------
 type indexedSliceDict[T comparable] struct {
-	slots   []slot[T]
-	stamp   uint32
+	nodes   []*node[T]
+	stamps  []uint8 // by slot: the search that wrote it, 0 none
+	stamp   uint8
 	indexOf func(T) int
-}
-
-// a slot holds its node only while its stamp is the dictionary's
-type slot[T comparable] struct {
-	node  *node[T]
-	stamp uint32
 }
 
 func newIndexedSliceDict[T comparable](maxSize int, indexer func(T) int) *indexedSliceDict[T] {
 	return &indexedSliceDict[T]{
-		slots:   make([]slot[T], maxSize),
+		nodes:   make([]*node[T], maxSize),
+		stamps:  make([]uint8, maxSize),
 		stamp:   1,
 		indexOf: indexer,
 	}
 }
 func (d *indexedSliceDict[T]) get(id T) (*node[T], bool) {
-	s := d.slots[d.indexOf(id)]
-	if s.stamp != d.stamp {
+	i := d.indexOf(id)
+	if d.stamps[i] != d.stamp {
 		return nil, false
 	}
-	return s.node, true
+	return d.nodes[i], true
 }
 func (d *indexedSliceDict[T]) set(id T, node *node[T]) {
-	d.slots[d.indexOf(id)] = slot[T]{node: node, stamp: d.stamp}
+	i := d.indexOf(id)
+	d.nodes[i], d.stamps[i] = node, d.stamp
 }
-func (d *indexedSliceDict[T]) remove(id T) { d.slots[d.indexOf(id)] = slot[T]{} }
+func (d *indexedSliceDict[T]) remove(id T) { d.stamps[d.indexOf(id)] = 0 }
 
-// clear moves the stamp on, leaving the slots be; only a stamp wrapping to 0 wipes them
+// clear moves the stamp on, leaving the slots be; only a stamp wrapping to 0 wipes the stamps
 func (d *indexedSliceDict[T]) clear() {
 	if d.stamp++; d.stamp == 0 {
-		clear(d.slots)
+		clear(d.stamps)
 		d.stamp = 1
 	}
 }
