@@ -1,5 +1,7 @@
 package astar
 
+import "math"
+
 // ---------------
 // Internal Node Dictionary
 // ---------------
@@ -8,6 +10,9 @@ type nodeDict[T comparable] interface {
 	set(id T, node *node[T])
 	remove(id T)
 	clear()
+	// wipe wipes now what a clear would, where fewer than within clears are left before one
+	// would; true where it did
+	wipe(within int) bool
 }
 
 // ---------------
@@ -24,6 +29,7 @@ func (d *mapDict[T]) get(id T) (*node[T], bool) { n, ok := d.m[id]; return n, ok
 func (d *mapDict[T]) set(id T, node *node[T])   { d.m[id] = node }
 func (d *mapDict[T]) remove(id T)               { delete(d.m, id) }
 func (d *mapDict[T]) clear()                    { clear(d.m) }
+func (d *mapDict[T]) wipe(int) bool             { return false }
 
 // ---------------
 // Indexed Map-based Node Dictionary
@@ -44,6 +50,7 @@ func (d *indexedMapDict[T]) get(id T) (*node[T], bool) { n, ok := d.m[d.indexOf(
 func (d *indexedMapDict[T]) set(id T, node *node[T])   { d.m[d.indexOf(id)] = node }
 func (d *indexedMapDict[T]) remove(id T)               { delete(d.m, d.indexOf(id)) }
 func (d *indexedMapDict[T]) clear()                    { clear(d.m) }
+func (d *indexedMapDict[T]) wipe(int) bool             { return false }
 
 // ---------------
 // Slice-based Node Dictionary (for fixed-size, integer-indexable IDs)
@@ -82,4 +89,13 @@ func (d *indexedSliceDict[T]) clear() {
 		clear(d.stamps)
 		d.stamp = 1
 	}
+}
+
+func (d *indexedSliceDict[T]) wipe(within int) bool {
+	if math.MaxUint8-int(d.stamp) >= within {
+		return false
+	}
+	clear(d.stamps)
+	d.stamp = 1
+	return true
 }

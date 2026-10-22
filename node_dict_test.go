@@ -51,3 +51,24 @@ func TestIndexedSliceDict_StampWraps(t *testing.T) {
 		}
 	}
 }
+
+func TestIndexedSliceDict_WipesWithinSoManyClearsOfTheWrap(t *testing.T) {
+	d := newIndexedSliceDict[int](4, func(i int) int { return i })
+	var n node[int]
+	d.stamp = math.MaxUint8 - 64
+	d.set(0, &n)
+	if d.wipe(64) {
+		t.Fatal("64 clears left: wiped within 64")
+	}
+	d.stamp++
+	d.set(1, &n)
+	if !d.wipe(64) {
+		t.Fatal("63 clears left: not wiped within 64")
+	}
+	if d.stamp != 1 || d.stamps[0] != 0 || d.stamps[1] != 0 {
+		t.Fatalf("after the wipe: stamp %d, stamps %v; want 1 and none", d.stamp, d.stamps)
+	}
+	if _, ok := d.get(1); ok {
+		t.Fatal("slot 1 still found after the wipe")
+	}
+}

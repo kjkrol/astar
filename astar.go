@@ -75,6 +75,14 @@ func New[T comparable](
 	}
 }
 
+// Wipe wipes the solver's memory of its searches now, between two, where fewer than within
+// searches are left before one would wipe it; true where it did. Only a WithIndexedSliceDict
+// solver wipes its memory, once every 255 searches.
+func (s *Solver[T]) Wipe(within int) bool {
+	opened := s.open.dict.wipe(within)
+	return s.closed.dict.wipe(within) || opened
+}
+
 // Solves the optimal transition sequence between the 'from' and 'to' states.
 // It returns the full sequence of states, or nil if no solution exists.
 func (a *Solver[T]) Solve(from, to T, transitions Transitions[T]) []T {

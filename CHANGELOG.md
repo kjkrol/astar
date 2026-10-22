@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v1.1.3]
+
+### Added
+
+- `Solver.Wipe(within)`: a `WithIndexedSliceDict` solver wipes its stamps between two searches,
+  where fewer than `within` are left before a search would wipe them, so a caller with the solver
+  idle takes the wipe once every 255 searches off its next search.
+
 ## [v1.1.2]
 
 ### Added
