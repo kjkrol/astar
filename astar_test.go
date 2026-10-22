@@ -1,6 +1,7 @@
 package astar_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/kjkrol/astar"
@@ -90,4 +91,154 @@ func TestSolver_UnreachableTarget(t *testing.T) {
 			t.Fatalf("expected nil for an unreachable target, got %v", path)
 		}
 	})
+}
+
+func TestSolver_ReusedAcrossSearches(t *testing.T) {
+	const size = 32
+	grid := setupGrid(size)
+	transitions := setupTransitions(1.0, grid)
+	indexer := func(p Point) int { return p.Y*size + p.X }
+	dictionaries := map[string][]astar.SolverOption[Point]{
+		"DefaultDict":      nil,
+		"IndexedMapDict":   {astar.WithIndexedMapDict(indexer)},
+		"IndexedSliceDict": {astar.WithIndexedSliceDict(size*size, indexer)},
+	}
+	queries := [][2]Point{
+		{{X: 0, Y: 0}, {X: size - 1, Y: size - 1}},
+		{{X: size - 1, Y: size - 1}, {X: 0, Y: 0}},
+		{{X: 0, Y: 0}, {X: 2, Y: 0}}, // a wall: unreachable
+		{{X: 5, Y: 5}, {X: 20, Y: 9}},
+		{{X: 0, Y: 0}, {X: size - 1, Y: size - 1}},
+		{{X: 3, Y: 3}, {X: 3, Y: 3}},
+		{{X: 20, Y: 9}, {X: 5, Y: 5}},
+	}
+
+	for dictName, opts := range dictionaries {
+		t.Run(dictName, func(t *testing.T) {
+			reused := setupPathFinder(opts...)
+			for _, q := range queries {
+				got := reused.Solve(q[0], q[1], transitions)
+				want := setupPathFinder(opts...).Solve(q[0], q[1], transitions)
+				if !slices.Equal(got, want) {
+					t.Fatalf("%v -> %v on a reused solver: got %v, want %v", q[0], q[1], got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestSolver_KeepsGrownTransitionBuffer(t *testing.T) {
+	const size = 8
+	var grown, calls int
+	transitions := func(
+		from, prev Point,
+		buf []astar.Transition[Point],
+	) []astar.Transition[Point] {
+		calls++
+		if len(buf) != 0 {
+			t.Fatalf("call %d: the buffer holds %d transitions; want none", calls, len(buf))
+		}
+		if cap(buf) < grown {
+			t.Fatalf("call %d: the buffer's capacity is %d; it had grown to %d",
+				calls, cap(buf), grown)
+		}
+		// a dead end handing back no buffer at all must not lose the grown one
+		if from == (Point{X: 1, Y: 1}) {
+			return nil
+		}
+		for dx := -1; dx <= 1; dx++ {
+			for dy := -1; dy <= 1; dy++ {
+				to := Point{X: from.X + dx, Y: from.Y + dy}
+				off := to.X < 0 || to.Y < 0 || to.X >= size || to.Y >= size
+				if off || to == from || to == prev {
+					continue
+				}
+				buf = append(buf, astar.Transition[Point]{To: to, Cost: 1})
+			}
+		}
+		grown = max(grown, cap(buf))
+		return buf
+	}
+
+	solver := setupPathFinder()
+	for range 2 {
+		verifyPath(t, solver.Solve(Point{}, Point{X: size - 1, Y: size - 1}, transitions),
+			Point{}, Point{X: size - 1, Y: size - 1})
+	}
+	if grown <= 4 {
+		t.Fatalf("the buffer never grew past the default capacity: %d", grown)
+	}
+}
+
+func TestSolver_ResultIntoWritesTheResult(t *testing.T) {
+	const size = 32
+	grid := setupGrid(size)
+	transitions := setupTransitions(1.0, grid)
+	indexer := func(p Point) int { return p.Y*size + p.X }
+	dictionaries := map[string][]astar.SolverOption[Point]{
+		"DefaultDict":      nil,
+		"IndexedMapDict":   {astar.WithIndexedMapDict(indexer)},
+		"IndexedSliceDict": {astar.WithIndexedSliceDict(size*size, indexer)},
+	}
+	queries := [][2]Point{
+		{{X: 0, Y: 0}, {X: 2, Y: 0}}, // a wall: unreachable
+		{{X: 3, Y: 3}, {X: 3, Y: 3}},
+		{{X: 5, Y: 5}, {X: 20, Y: 9}},
+		{{X: 0, Y: 0}, {X: size - 1, Y: size - 1}},
+		{{X: 20, Y: 9}, {X: 5, Y: 5}},
+		{{X: 0, Y: 0}, {X: 2, Y: 0}},
+	}
+
+	for dictName, opts := range dictionaries {
+		t.Run(dictName, func(t *testing.T) {
+			solver, stepped := setupPathFinder(opts...), setupPathFinder(opts...)
+			buf := make([]Point, 1, 2)
+			var iterBuf []Point
+			for _, q := range queries {
+				want := setupPathFinder(opts...).Solve(q[0], q[1], transitions)
+				before := buf
+				buf = solver.SolveInto(buf, q[0], q[1], transitions)
+				if !slices.Equal(buf, want) {
+					t.Fatalf("%v -> %v: SolveInto gave %v, want %v", q[0], q[1], buf, want)
+				}
+				if cap(before) >= len(want) && cap(buf) != cap(before) {
+					t.Fatalf("%v -> %v: a buffer of capacity %d was replaced for a path of %d",
+						q[0], q[1], cap(before), len(want))
+				}
+				for range stepped.Iter(q[0], q[1], transitions) {
+				}
+				iterBuf = stepped.ResultInto(iterBuf)
+				if !slices.Equal(iterBuf, want) {
+					t.Fatalf("%v -> %v: ResultInto gave %v, want %v", q[0], q[1], iterBuf, want)
+				}
+			}
+		})
+	}
+}
+
+func TestSolver_SolveIntoAllocatesNothing(t *testing.T) {
+	const size = 64
+	grid := setupGrid(size)
+	transitions := setupTransitions(1.0, grid)
+	start, to := Point{X: 0, Y: 0}, Point{X: size - 1, Y: size - 1}
+	indexer := func(p Point) int { return p.Y*size + p.X }
+	dictionaries := map[string][]astar.SolverOption[Point]{
+		"DefaultDict":      nil,
+		"IndexedMapDict":   {astar.WithIndexedMapDict(indexer)},
+		"IndexedSliceDict": {astar.WithIndexedSliceDict(size*size, indexer)},
+	}
+
+	for dictName, opts := range dictionaries {
+		t.Run(dictName, func(t *testing.T) {
+			solver := setupPathFinder(opts...)
+			path := solver.SolveInto(nil, start, to, transitions)
+			verifyPath(t, path, start, to)
+			allocs := testing.AllocsPerRun(10, func() {
+				path = solver.SolveInto(path, start, to, transitions)
+			})
+			if allocs != 0 {
+				t.Fatalf("SolveInto into a buffer big enough allocates %v times; want none", allocs)
+			}
+		})
+	}
 }

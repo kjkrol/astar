@@ -37,6 +37,7 @@ func BenchmarkSolver_Solve(b *testing.B) {
 
 					b.Run("WithIndexedSliceDict", func(b *testing.B) {
 						pathFinder := setupPathFinder(
+							astar.WithInitCapacity[Point](maxSize),
 							astar.WithIndexedSliceDict(maxSize, indexer),
 						)
 						b.ResetTimer()

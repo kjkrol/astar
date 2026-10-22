@@ -50,19 +50,36 @@ func (d *indexedMapDict[T]) clear()                    { clear(d.m) }
 // ---------------
 type indexedSliceDict[T comparable] struct {
 	nodes   []*node[T]
+	stamps  []uint8 // by slot: the search that wrote it, 0 none
+	stamp   uint8
 	indexOf func(T) int
 }
 
 func newIndexedSliceDict[T comparable](maxSize int, indexer func(T) int) *indexedSliceDict[T] {
 	return &indexedSliceDict[T]{
 		nodes:   make([]*node[T], maxSize),
+		stamps:  make([]uint8, maxSize),
+		stamp:   1,
 		indexOf: indexer,
 	}
 }
 func (d *indexedSliceDict[T]) get(id T) (*node[T], bool) {
-	n := d.nodes[d.indexOf(id)]
-	return n, n != nil
+	i := d.indexOf(id)
+	if d.stamps[i] != d.stamp {
+		return nil, false
+	}
+	return d.nodes[i], true
 }
-func (d *indexedSliceDict[T]) set(id T, node *node[T]) { d.nodes[d.indexOf(id)] = node }
-func (d *indexedSliceDict[T]) remove(id T)             { d.nodes[d.indexOf(id)] = nil }
-func (d *indexedSliceDict[T]) clear()                  { clear(d.nodes) }
+func (d *indexedSliceDict[T]) set(id T, node *node[T]) {
+	i := d.indexOf(id)
+	d.nodes[i], d.stamps[i] = node, d.stamp
+}
+func (d *indexedSliceDict[T]) remove(id T) { d.stamps[d.indexOf(id)] = 0 }
+
+// clear moves the stamp on, leaving the slots be; only a stamp wrapping to 0 wipes the stamps
+func (d *indexedSliceDict[T]) clear() {
+	if d.stamp++; d.stamp == 0 {
+		clear(d.stamps)
+		d.stamp = 1
+	}
+}

@@ -78,34 +78,32 @@ func New[T comparable](
 // Solves the optimal transition sequence between the 'from' and 'to' states.
 // It returns the full sequence of states, or nil if no solution exists.
 func (a *Solver[T]) Solve(from, to T, transitions Transitions[T]) []T {
-	for range a.Iter(from, to, transitions) {
+	return a.SolveInto(nil, from, to, transitions)
+}
+
+// SolveInto is Solve writing the sequence into dst as ResultInto does, so a reused dst spares
+// the search the allocation of its result.
+func (a *Solver[T]) SolveInto(dst []T, from, to T, transitions Transitions[T]) []T {
+	a.start(from, to)
+	for !a.next(to, transitions) {
 	}
-	return a.Result()
+	return a.ResultInto(dst)
 }
 
 // Iter yields false while searching and true once the 'to' state is reached.
 // The sequence terminates immediately after reaching the target, or ends
 // without ever yielding true if 'to' is unreachable — Result then returns nil.
 func (a *Solver[T]) Iter(from, to T, transitions Transitions[T]) iter.Seq[bool] {
-	a.reset()
-	a.open.insert(from, nil, 0, a.heuristic(from, to))
+	a.start(from, to)
 
 	return func(yield func(bool) bool) {
 		for {
-			node, ok := a.open.pop()
-			if !ok {
-				a.current = nil
+			if a.next(to, transitions) {
+				if a.current != nil {
+					yield(true)
+				}
 				return
 			}
-			a.current = node
-
-			if a.current.ID == to {
-				yield(true)
-				return
-			}
-
-			a.expandCurrent(to, transitions)
-
 			if !yield(false) {
 				return
 			}
@@ -113,12 +111,37 @@ func (a *Solver[T]) Iter(from, to T, transitions Transitions[T]) iter.Seq[bool] 
 	}
 }
 
+func (a *Solver[T]) start(from, to T) {
+	a.reset()
+	a.open.insert(from, nil, 0, a.heuristic(from, to))
+}
+
+// next visits the open node of least F; true once the search is over, current then the target
+// reached or nil
+func (a *Solver[T]) next(to T, transitions Transitions[T]) bool {
+	node, ok := a.open.pop()
+	if !ok {
+		a.current = nil
+		return true
+	}
+	a.current = node
+	if node.ID == to {
+		return true
+	}
+	a.expandCurrent(to, transitions)
+	return false
+}
+
 func (a *Solver[T]) expandCurrent(to T, transitions Transitions[T]) {
 	parentID := a.current.ID
 	if a.current.Parent != nil {
 		parentID = a.current.Parent.ID
 	}
-	for _, transition := range transitions(a.current.ID, parentID, a.transitionBuf[:0]) {
+	successors := transitions(a.current.ID, parentID, a.transitionBuf[:0])
+	if cap(successors) > cap(a.transitionBuf) {
+		a.transitionBuf = successors[:0]
+	}
+	for _, transition := range successors {
 		G := a.current.G + transition.Cost
 		F := G + a.heuristic(transition.To, to)
 
@@ -148,21 +171,21 @@ func (a *Solver[T]) expandCurrent(to T, transitions Transitions[T]) {
 // Result reconstructs and returns the path from the starting state to the current state.
 // It is typically called immediately after the Iter sequence yields 'true'.
 func (a *Solver[T]) Result() []T {
-	if a.current == nil {
-		return nil
+	return a.ResultInto(nil)
+}
+
+// ResultInto is Result written over dst, which grows only when shorter than the path; with no
+// path it returns dst emptied.
+func (a *Solver[T]) ResultInto(dst []T) []T {
+	n := 0
+	for node := a.current; node != nil; node = node.Parent {
+		n++
 	}
-
-	var path []T
-	node := a.current
-
-	for node != nil {
-		path = append(path, node.ID)
-		node = node.Parent
+	dst = slices.Grow(dst[:0], n)[:n]
+	for node, i := a.current, n-1; node != nil; node, i = node.Parent, i-1 {
+		dst[i] = node.ID
 	}
-
-	slices.Reverse(path)
-
-	return path
+	return dst
 }
 
 func (a *Solver[T]) reset() {
