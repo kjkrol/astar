@@ -1,6 +1,7 @@
 package astar_test
 
 import (
+	"math"
 	"slices"
 	"testing"
 
@@ -240,5 +241,32 @@ func TestSolver_SolveIntoAllocatesNothing(t *testing.T) {
 				t.Fatalf("SolveInto into a buffer big enough allocates %v times; want none", allocs)
 			}
 		})
+	}
+}
+
+func TestSolver_WipeBetweenSearches(t *testing.T) {
+	const size = 32
+	grid := setupGrid(size)
+	transitions := setupTransitions(1.0, grid)
+	indexer := func(p Point) int { return p.Y*size + p.X }
+	from, to := Point{X: 0, Y: 0}, Point{X: size - 1, Y: size - 1}
+	want := setupPathFinder().Solve(from, to, transitions)
+
+	s := setupPathFinder(astar.WithIndexedSliceDict(size*size, indexer))
+	for range 190 {
+		s.Solve(from, to, transitions)
+	}
+	if s.Wipe(64) {
+		t.Fatal("wiped with 64 searches left before the stamp wraps")
+	}
+	s.Solve(from, to, transitions)
+	if !s.Wipe(64) {
+		t.Fatal("not wiped with 63 searches left before the stamp wraps")
+	}
+	if got := s.Solve(from, to, transitions); !slices.Equal(got, want) {
+		t.Fatalf("after the wipe: got %v, want %v", got, want)
+	}
+	if setupPathFinder().Wipe(math.MaxInt) {
+		t.Fatal("a solver over a map wiped")
 	}
 }

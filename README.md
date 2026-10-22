@@ -40,7 +40,7 @@ go get github.com/kjkrol/goke
 This solver is built for extreme performance. By utilizing Go 1.18+ Generics, custom memory arenas, and highly optimized data structures, we drastically reduce memory allocations and prevent heap escapes during the hot path of the search.
 
 **Key Optimizations:**
-* **`WithIndexedSliceDict`:** Replaces standard Go maps with a pre-allocated slice for tracking visited nodes. It completely eliminates hashing overhead and interface boxing. A byte beside each slot holds the stamp of the search that wrote it, so a new search resets the dictionary by moving the stamp on instead of clearing `maxSize` slots; the stamps are wiped once every 255 searches.
+* **`WithIndexedSliceDict`:** Replaces standard Go maps with a pre-allocated slice for tracking visited nodes. It completely eliminates hashing overhead and interface boxing. A byte beside each slot holds the stamp of the search that wrote it, so a new search resets the dictionary by moving the stamp on instead of clearing `maxSize` slots; the stamps are wiped once every 255 searches, or ahead of time, between two, by `Solver.Wipe`.
 * **Node Arena:** An internal chunk-based memory arena ensures that millions of nodes can be processed with near-zero allocations after the initial setup.
 * **`SolveInto`:** Writes the path into the caller's buffer; a search reusing its buffer allocates nothing.
 
