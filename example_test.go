@@ -2,91 +2,45 @@ package astar_test
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/kjkrol/astar"
 )
 
-// Point represents a coordinate on a 2D grid.
-type Point2d struct {
-	X, Y int
+// a cell's share of full speed: 1 open ground, 0.3 mud, 0 a wall
+var shares = [][]float64{
+	{1, 1, 1},
+	{1, 0.3, 1},
+	{1, 0, 1},
 }
 
 func ExampleSolver_Solve() {
-	// Define a simple 3x3 grid where 1 represents a wall/blocked cell.
-	grid := [][]int{
-		{0, 0, 0},
-		{1, 1, 0},
-		{0, 0, 0},
+	width, height := len(shares[0]), len(shares)
+	// the Manhattan distance never exceeds the cost left: no share exceeds 1, so no step costs
+	// less than its length
+	manhattan := func(a, b Point) float64 {
+		return math.Abs(float64(a.X-b.X)) + math.Abs(float64(a.Y-b.Y))
 	}
-	width, height := 3, 3
+	solver := astar.New(manhattan,
+		astar.WithIndexedSliceDict(width*height, func(p Point) int { return p.Y*width + p.X }),
+		astar.WithSuccessorCapacity[Point](4))
 
-	// Indexer maps a Point to a unique dense integer for maximum performance.
-	// This allows the slice-based dictionary to bypass heavy hashmap lookups.
-	indexer := func(p Point2d) int {
-		return p.Y*width + p.X
-	}
-
-	// Define a simple Manhattan distance heuristic
-	heuristic := func(from, to Point2d) float64 {
-		dx := from.X - to.X
-		dy := from.Y - to.Y
-		if dx < 0 {
-			dx = -dx
-		}
-		if dy < 0 {
-			dy = -dy
-		}
-		return float64(dx + dy)
-	}
-
-	// Setup the solver with maximum optimizations for a bounded space.
-	solver := astar.New[Point2d](
-		heuristic,
-		astar.WithInitCapacity[Point2d](width*height),
-		astar.WithIndexedSliceDict(width*height, indexer),
-	)
-
-	// Define transitions (allowed movements on our grid).
-	transitions := func(from, prev Point2d, buffer []astar.Transition[Point2d]) []astar.Transition[Point2d] {
-		// Reset buffer slice while preserving underlying allocation
-		buffer = buffer[:0]
-
-		// 4-directional movement vectors (Up, Down, Left, Right)
-		dirs := []Point2d{{0, -1}, {0, 1}, {-1, 0}, {1, 0}}
-
+	dirs := [4]Point{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
+	steps := func(from, prev Point, buf []astar.Transition[Point]) []astar.Transition[Point] {
 		for _, d := range dirs {
-			next := Point2d{X: from.X + d.X, Y: from.Y + d.Y}
-
-			// 1. Boundary check
-			if next.X < 0 || next.X >= width || next.Y < 0 || next.Y >= height {
+			to := Point{X: from.X + d.X, Y: from.Y + d.Y}
+			if to.X < 0 || to.Y < 0 || to.X >= width || to.Y >= height || to == prev {
 				continue
 			}
-			// 2. Obstacle check
-			if grid[next.Y][next.X] == 1 {
+			share := shares[to.Y][to.X]
+			if share == 0 { // a wall: a step not generated
 				continue
 			}
-			// 3. Prevent immediate backtracking to the previous state
-			if next == prev {
-				continue
-			}
-
-			// Append valid step with a uniform move cost of 1.0
-			buffer = append(buffer, astar.Transition[Point2d]{To: next, Cost: 1.0})
+			buf = append(buf, astar.Transition[Point]{To: to, Cost: 1 / share})
 		}
-		return buffer
+		return buf
 	}
 
-	// Define start and target states
-	from := Point2d{X: 0, Y: 0}
-	to := Point2d{X: 0, Y: 2}
-
-	// Solve the problem
-	path := solver.Solve(from, to, transitions)
-
-	fmt.Printf("Path length: %d\n", len(path))
-	fmt.Printf("Steps: %v\n", path)
-
-	// Output:
-	// Path length: 7
-	// Steps: [{0 0} {1 0} {2 0} {2 1} {2 2} {1 2} {0 2}]
+	fmt.Println(solver.Solve(Point{X: 0, Y: 2}, Point{X: 2, Y: 2}, steps))
+	// Output: [{0 2} {0 1} {0 0} {1 0} {2 0} {2 1} {2 2}]
 }

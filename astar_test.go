@@ -15,17 +15,17 @@ func TestSolver(t *testing.T) {
 	to := Point{X: size - 1, Y: size - 1}
 	indexer := func(p Point) int { return p.Y*size + p.X }
 
-	// Tabela konfiguracji słowników (Dictionaries)
 	dictionaries := map[string][]astar.SolverOption[Point]{
-		"DefaultDict":      nil,
-		"IndexedMapDict":   {astar.WithInitCapacity[Point](size * size), astar.WithIndexedMapDict(indexer)},
+		"DefaultDict": nil,
+		"IndexedMapDict": {
+			astar.WithInitCapacity[Point](size * size),
+			astar.WithIndexedMapDict(indexer),
+		},
 		"IndexedSliceDict": {astar.WithIndexedSliceDict(size*size, indexer)},
 	}
 
 	for dictName, opts := range dictionaries {
 		t.Run(dictName, func(t *testing.T) {
-
-			// 1. Test dla metody Solve
 			t.Run("Solve", func(t *testing.T) {
 				pathFinder := setupPathFinder(opts...)
 				transitions := setupTransitions(1.0, grid)
@@ -34,12 +34,10 @@ func TestSolver(t *testing.T) {
 				verifyPath(t, path, start, to)
 			})
 
-			// 2. Test dla metody Iter
 			t.Run("Iter", func(t *testing.T) {
 				pathFinder := setupPathFinder(opts...)
 				transitions := setupTransitions(1.0, grid)
 
-				// Konsumowanie iteratora do końca
 				for range pathFinder.Iter(start, to, transitions) {
 				}
 
@@ -50,7 +48,6 @@ func TestSolver(t *testing.T) {
 	}
 }
 
-// Generyczny helper do weryfikacji asercji ścieżki
 func verifyPath(t *testing.T, path []Point, start, to Point) {
 	t.Helper()
 	if len(path) == 0 {
@@ -242,6 +239,19 @@ func TestSolver_SolveIntoAllocatesNothing(t *testing.T) {
 			}
 		})
 	}
+	t.Run("Octile", func(t *testing.T) {
+		transitions := setupTransitions8(grid)
+		solver := setupOctileFinder(astar.WithIndexedSliceDict(size*size, indexer),
+			astar.WithSuccessorCapacity[Point](8))
+		path := solver.SolveInto(nil, start, to, transitions)
+		verifyPath(t, path, start, to)
+		allocs := testing.AllocsPerRun(10, func() {
+			path = solver.SolveInto(path, start, to, transitions)
+		})
+		if allocs != 0 {
+			t.Fatalf("SolveInto eight ways allocates %v times; want none", allocs)
+		}
+	})
 }
 
 func TestSolver_WipeBetweenSearches(t *testing.T) {

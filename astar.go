@@ -1,55 +1,46 @@
 package astar
 
 import (
-	"container/heap"
 	"iter"
 	"slices"
 )
 
-// Heuristic defines the estimated cost to travel from one state to another.
-//
-// Note on Performance vs. Optimality:
-// To drastically narrow the search space and speed up the solver, the heuristic's
-// contribution should dominate the actual step cost. You can achieve this by multiplying
-// the heuristic result by a weight (e.g., > 1.0) or by reducing the step cost.
-// This effectively turns the algorithm into Weighted A*, which visits far fewer nodes
-// but sacrifices the guarantee of finding the absolute shortest path.
+// Heuristic estimates the cheapest cost left from one state to another. It never estimates more
+// than that, or the path found is not the cheapest; consistent (see the package), it has no
+// state expanded twice.
 type Heuristic[T comparable] func(from, to T) float64
 
-// Transition represents a valid movement or mutation in the state space,
-// capturing the destination state and the cost incurred to reach it.
+// Transition is one step the search may take: the state it reaches and its Cost, added to the
+// path's and never negative.
 type Transition[T comparable] struct {
-	To   T       // The destination state of this transition.
-	Cost float64 // The edge weight or cost associated with this state change.
+	To   T
+	Cost float64
 }
 
-// Transitions defines how steps between states are discovered and how their costs are calculated.
-// It populates the provided reusable buffer with all valid, directly reachable transitions
-// from the 'from' state in a single pass.
-//
-// This decoupled design keeps the Solver strictly generic and agnostic of the underlying
-// graph structure, state representation, or domain-specific cost metrics. It is the
-// ideal place to:
-//  1. Evaluate valid neighbor nodes and compute dynamic transition costs (edge weights).
-//  2. Filter out invalid, blocked, or out-of-bounds destinations.
-//  3. Prevent immediate backtracking or simple cycles by utilizing the 'prev' state.
-//  4. Perform early pruning by excluding transitions whose cost exceeds custom thresholds.
-//
-// Returns the sliced buffer containing the valid transitions.
+// Transitions appends to buffer every step from from, prev being the state from was reached from
+// (from itself at the start), and returns it; a step refused is one not appended. A larger buffer
+// returned is kept by the Solver.
 type Transitions[T comparable] func(from, prev T, buffer []Transition[T]) []Transition[T]
 
-// Indexer maps a complex state of type T to a unique, contiguous integer identifier.
-// It is required when using highly optimized internal structures like IndexedSliceDict.
+// Indexer maps a state to an integer of its own, in [0, maxSize) for WithIndexedSliceDict.
 type Indexer[T comparable] func(T) int
 
-// Solver is a generic, high-performance pathfinding and state-space search engine
-// based on the A* algorithm. It is entirely agnostic to the underlying domain problem.
+// Solver searches a state space by A*: made once by New for a Heuristic, reused across searches,
+// never concurrently.
 type Solver[T comparable] struct {
-	open          *open[T]
-	closed        *closed[T]
+	nodes         []node[T]
+	heap          openHeap
+	dict          nodeDict[T]
 	heuristic     Heuristic[T]
 	transitionBuf []Transition[T]
-	current       *node[T]
+	current       int32
+}
+
+// a state reached, by the id of the node it was reached from; -1 the start
+type node[T comparable] struct {
+	ID     T
+	G      float64
+	Parent int32
 }
 
 // New initializes and returns a new Solver configured with the provided
@@ -64,27 +55,30 @@ func New[T comparable](
 		opt(&cfg)
 	}
 
-	openDict := cfg.dictFactory(cfg.capacity)
-	closedDict := cfg.dictFactory(cfg.capacity)
+	capacity := cfg.capacity
+	if capacity <= 0 {
+		capacity = defaultCapacity
+	}
 
 	return &Solver[T]{
-		open:          newOpen[T](cfg.capacity, openDict),
-		closed:        newClosed[T](closedDict),
+		nodes:         make([]node[T], 0, capacity),
+		heap:          newOpenHeap(capacity),
+		dict:          cfg.dictFactory(cfg.capacity),
 		heuristic:     heuristic,
 		transitionBuf: make([]Transition[T], 0, cfg.transitionsCap),
+		current:       -1,
 	}
 }
 
 // Wipe wipes the solver's memory of its searches now, between two, where fewer than within
 // searches are left before one would wipe it; true where it did. Only a WithIndexedSliceDict
 // solver wipes its memory, once every 255 searches.
-func (s *Solver[T]) Wipe(within int) bool {
-	opened := s.open.dict.wipe(within)
-	return s.closed.dict.wipe(within) || opened
+func (a *Solver[T]) Wipe(within int) bool {
+	return a.dict.wipe(within)
 }
 
-// Solves the optimal transition sequence between the 'from' and 'to' states.
-// It returns the full sequence of states, or nil if no solution exists.
+// Solve is the cheapest sequence of states from from to to, from and to included; nil where to
+// is unreachable.
 func (a *Solver[T]) Solve(from, to T, transitions Transitions[T]) []T {
 	return a.SolveInto(nil, from, to, transitions)
 }
@@ -98,16 +92,16 @@ func (a *Solver[T]) SolveInto(dst []T, from, to T, transitions Transitions[T]) [
 	return a.ResultInto(dst)
 }
 
-// Iter yields false while searching and true once the 'to' state is reached.
-// The sequence terminates immediately after reaching the target, or ends
-// without ever yielding true if 'to' is unreachable — Result then returns nil.
+// Iter runs the search a state at a time, yielding false after each expansion and true once to
+// is reached, nothing more where it is unreachable. Result then is the path to the state last
+// expanded, nil where none was.
 func (a *Solver[T]) Iter(from, to T, transitions Transitions[T]) iter.Seq[bool] {
 	a.start(from, to)
 
 	return func(yield func(bool) bool) {
 		for {
 			if a.next(to, transitions) {
-				if a.current != nil {
+				if a.current >= 0 {
 					yield(true)
 				}
 				return
@@ -121,63 +115,75 @@ func (a *Solver[T]) Iter(from, to T, transitions Transitions[T]) iter.Seq[bool] 
 
 func (a *Solver[T]) start(from, to T) {
 	a.reset()
-	a.open.insert(from, nil, 0, a.heuristic(from, to))
+	n := a.alloc(from, -1, 0)
+	a.heap.push(n, a.heuristic(from, to))
+	a.dict.set(from, n)
 }
 
 // next visits the open node of least F; true once the search is over, current then the target
-// reached or nil
+// reached or -1
 func (a *Solver[T]) next(to T, transitions Transitions[T]) bool {
-	node, ok := a.open.pop()
+	n, ok := a.heap.pop()
 	if !ok {
-		a.current = nil
+		a.current = -1
 		return true
 	}
-	a.current = node
-	if node.ID == to {
+	a.current = n
+	if a.nodes[n].ID == to {
 		return true
 	}
 	a.expandCurrent(to, transitions)
 	return false
 }
 
+// The dictionary holds a state's node: open as its id, closed as the id's complement, ^id. A
+// closed state reached cheaper is opened again as a fresh node, the old one left behind for
+// whoever was reached through it. The current node's fields are copied out first: alloc may
+// move the nodes.
 func (a *Solver[T]) expandCurrent(to T, transitions Transitions[T]) {
-	parentID := a.current.ID
-	if a.current.Parent != nil {
-		parentID = a.current.Parent.ID
+	cur := a.current
+	curID, curG := a.nodes[cur].ID, a.nodes[cur].G
+	parentID := curID
+	if p := a.nodes[cur].Parent; p >= 0 {
+		parentID = a.nodes[p].ID
 	}
-	successors := transitions(a.current.ID, parentID, a.transitionBuf[:0])
+	successors := transitions(curID, parentID, a.transitionBuf[:0])
 	if cap(successors) > cap(a.transitionBuf) {
 		a.transitionBuf = successors[:0]
 	}
 	for _, transition := range successors {
-		G := a.current.G + transition.Cost
+		G := curG + transition.Cost
 		F := G + a.heuristic(transition.To, to)
 
-		inOpen, hasBetter := a.open.containsBetterOrEqual(transition.To, G)
-		if hasBetter {
-			continue
+		if slot, found := a.dict.get(transition.To); found {
+			n := slot
+			if slot < 0 {
+				n = ^slot
+			}
+			if a.nodes[n].G <= G {
+				continue
+			}
+			if slot >= 0 {
+				a.nodes[n].Parent, a.nodes[n].G = cur, G
+				a.heap.fix(n, F)
+				continue
+			}
 		}
-
-		inClosed, hasBetter := a.closed.containsBetterOrEqual(transition.To, G)
-		if hasBetter {
-			continue
-		}
-
-		if inClosed {
-			a.closed.remove(transition.To)
-		}
-
-		if inOpen {
-			a.open.update(transition.To, a.current, G, F)
-		} else {
-			a.open.insert(transition.To, a.current, G, F)
-		}
+		n := a.alloc(transition.To, cur, G)
+		a.heap.push(n, F)
+		a.dict.set(transition.To, n)
 	}
-	a.closed.insert(a.current)
+	a.dict.set(curID, ^cur)
 }
 
-// Result reconstructs and returns the path from the starting state to the current state.
-// It is typically called immediately after the Iter sequence yields 'true'.
+func (a *Solver[T]) alloc(id T, parent int32, g float64) int32 {
+	n := int32(len(a.nodes))
+	a.nodes = append(a.nodes, node[T]{ID: id, G: g, Parent: parent})
+	return n
+}
+
+// Result is the path from the start to the state Iter last expanded, the goal once it yielded
+// true.
 func (a *Solver[T]) Result() []T {
 	return a.ResultInto(nil)
 }
@@ -186,154 +192,19 @@ func (a *Solver[T]) Result() []T {
 // path it returns dst emptied.
 func (a *Solver[T]) ResultInto(dst []T) []T {
 	n := 0
-	for node := a.current; node != nil; node = node.Parent {
+	for i := a.current; i >= 0; i = a.nodes[i].Parent {
 		n++
 	}
 	dst = slices.Grow(dst[:0], n)[:n]
-	for node, i := a.current, n-1; node != nil; node, i = node.Parent, i-1 {
-		dst[i] = node.ID
+	for i, k := a.current, n-1; i >= 0; i, k = a.nodes[i].Parent, k-1 {
+		dst[k] = a.nodes[i].ID
 	}
 	return dst
 }
 
 func (a *Solver[T]) reset() {
-	a.closed.reset()
-	a.open.reset()
-	a.current = nil
-}
-
-// ---------------
-// node
-// ---------------
-type node[T comparable] struct {
-	ID     T
-	G, F   float64
-	Parent *node[T]
-	Index  int
-}
-
-// ---------------
-// Closed Nodes
-// ---------------
-type closed[T comparable] struct {
-	dict nodeDict[T]
-}
-
-func newClosed[T comparable](dict nodeDict[T]) *closed[T] {
-	return &closed[T]{dict: dict}
-}
-
-func (c *closed[T]) insert(node *node[T]) {
-	c.dict.set(node.ID, node)
-}
-
-func (c *closed[T]) containsBetterOrEqual(id T, newG float64) (exists, hasBetter bool) {
-	if existingNode, ok := c.dict.get(id); ok {
-		exists = true
-		hasBetter = existingNode.G <= newG
-	}
-	return
-}
-
-func (c *closed[T]) remove(id T) {
-	c.dict.remove(id)
-}
-
-func (c *closed[T]) reset() {
-	c.dict.clear()
-}
-
-// ---------------
-// Open Nodes
-// ---------------
-type open[T comparable] struct {
-	openPQ *openNodesPriorityQueue[T]
-	dict   nodeDict[T]
-	arena  *nodeArena[T]
-}
-
-func newOpen[T comparable](capacity int, dict nodeDict[T]) *open[T] {
-	openPQ := &openNodesPriorityQueue[T]{}
-	heap.Init(openPQ)
-
-	return &open[T]{
-		openPQ: openPQ,
-		dict:   dict,
-		arena:  newNodeArena[T](capacity),
-	}
-}
-
-func (o *open[T]) insert(id T, parent *node[T], g, f float64) {
-	node := o.arena.Get()
-	node.ID = id
-	node.Parent = parent
-	node.G = g
-	node.F = f
-	node.Index = -1
-	heap.Push(o.openPQ, node)
-	o.dict.set(node.ID, node)
-}
-
-func (o *open[T]) update(id T, parent *node[T], g, f float64) {
-	if x, ok := o.dict.get(id); ok {
-		x.Parent = parent
-		x.G = g
-		x.F = f
-		heap.Fix(o.openPQ, x.Index)
-	}
-}
-
-func (o *open[T]) pop() (*node[T], bool) {
-	if o.openPQ.Len() == 0 {
-		return nil, false
-	}
-	node := heap.Pop(o.openPQ).(*node[T])
-	o.dict.remove(node.ID)
-	return node, true
-}
-
-func (o *open[T]) containsBetterOrEqual(id T, newG float64) (exists, hasBetter bool) {
-	if existingNode, ok := o.dict.get(id); ok {
-		exists = true
-		hasBetter = existingNode.G <= newG
-	}
-	return
-}
-
-func (o *open[T]) reset() {
-	o.dict.clear()
-	if o.openPQ != nil {
-		clear(*o.openPQ)
-		*o.openPQ = (*o.openPQ)[:0]
-	}
-	o.arena.Reset()
-}
-
-// ---------------
-// (internal) Open Nodes Priority (by Node.F) Queue
-// ---------------
-type openNodesPriorityQueue[T comparable] []*node[T]
-
-var _ (heap.Interface) = (*openNodesPriorityQueue[any])(nil)
-
-func (q *openNodesPriorityQueue[T]) Push(x any) {
-	newNode := x.(*node[T])
-	newNode.Index = len(*q)
-	*q = append(*q, newNode)
-}
-func (q *openNodesPriorityQueue[T]) Pop() any {
-	old := *q
-	n := len(old)
-	node := old[n-1]
-	old[n-1] = nil
-	node.Index = -1
-	*q = old[0 : n-1]
-	return node
-}
-func (q *openNodesPriorityQueue[T]) Len() int           { return len(*q) }
-func (q *openNodesPriorityQueue[T]) Less(i, j int) bool { return (*q)[i].F < (*q)[j].F }
-func (q *openNodesPriorityQueue[T]) Swap(i, j int) {
-	(*q)[i].Index = j
-	(*q)[j].Index = i
-	(*q)[i], (*q)[j] = (*q)[j], (*q)[i]
+	a.nodes = a.nodes[:0]
+	a.heap.reset()
+	a.dict.clear()
+	a.current = -1
 }

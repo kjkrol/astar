@@ -20,13 +20,29 @@ jobs:
         check-latest: true
         cache: true
 
-    - name: Install dependencies
-      run: go mod download
+    - name: Vet
+      run: go vet ./...
 
     - name: Run Tests
       run: go test -v ./...
-    # - name: Run Linter
-    #   uses: golangci/golangci-lint-action@v6
-    #   with:
-    #     version: latest
-    #     args: --timeout=5m
+
+  test-simd:
+    runs-on: ubuntu-latest
+    env:
+      GOEXPERIMENT: simd
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.27'
+        check-latest: true
+        cache: true
+
+    - name: Vet
+      run: go vet ./...
+
+    - name: Run Tests
+      run: go test -v ./...
