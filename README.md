@@ -140,8 +140,9 @@ Three things to know as you scale up:
 - `Index` and `Size` give the fastest dictionary, a slot a state, 5 bytes each: the index must
   lie in `[0, Size)`, any other panics. With an `Index` and no `Size` the indices key a map, and
   with no `Index` the states themselves do.
-- `Path` writes as many states as your buffer holds and reports how many; a `Search` reusing its
-  memory allocates nothing once warm, and keeps its own house — there is nothing to wipe.
+- `Path` writes as many states as your buffer holds and reports how many; with `Index` and
+  `Size`, a `Search` reusing its memory allocates nothing once warm, and keeps its own house —
+  there is nothing to wipe.
 - One `Search` a goroutine: the `Searches` of one `Solver` may ask at once, and the graph's
   functions are called by all of them; `SearchVia` gives a goroutine's `Search` its own
   `Transitions` where it reads the graph its own way. `ExampleSolver_Search` asks from a pool
@@ -237,7 +238,8 @@ opposite corners, eight ways: v1.2.0's `SolveInto` against v1.3.0's `Path` witho
 | **1024x1024** | 347 ms · 736,844 | 350 ms · 736,844 | 1.38 ms (251×) · 3,319 |
 | **4096x4096** | 7.57 s · 12,450,466 | 7.51 s · 12,450,466 | 28.8 ms (263×) · 47,221 |
 
-Every path allocates nothing once warm. Without a `Layout`, `Path` is v1.2.0's search to the
+Every path allocates nothing once warm, the graphs here giving `Index` and `Size`. Without a
+`Layout`, `Path` is v1.2.0's search to the
 expansion, within one run's noise of its time; with one, the paths cost 1.016–1.019× the
 cheapest here. The hierarchy holds 44–48 bytes a cell (2.9 MB on 256x256, 50 MB on 1024x1024;
 34 on 4096x4096, 567 MB, its trees capped at 64 MB), built whole in 0.16 s, 3.0 s and 50 s; a

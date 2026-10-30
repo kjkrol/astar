@@ -415,6 +415,8 @@ func TestDijkstra_TransitionsSeePrevAsTheParent(t *testing.T) {
 	}
 }
 
+// The slice dictionary alone is pinned: a map's clear draws a new hash seed, so a map dictionary
+// may grow its tables on a later fill.
 func TestDijkstra_FillAllocatesNothingTwice(t *testing.T) {
 	const size, side = 64, 16
 	transitions := testmap.EightWays(testmap.WalledGrid(size))
@@ -422,29 +424,25 @@ func TestDijkstra_FillAllocatesNothingTwice(t *testing.T) {
 	sources := []Source[testmap.Point]{{At: testmap.Point{}},
 		{At: testmap.Point{X: side - 1}, Cost: 2}}
 	targets := []testmap.Point{{X: 0, Y: side - 1}, {X: side - 1, Y: side - 1}}
-	for name, dict := range testmap.Dicts(size) {
-		t.Run(name, func(t *testing.T) {
-			d := newPointDijkstra(dict())
-			fills := func() {
-				d.Fill(sources, transitions, nil, nil)
-				if got := d.Fill(sources, transitions, in, targets); got != len(targets) {
-					t.Fatalf("%d targets settled, want %d", got, len(targets))
-				}
-			}
-			fills()
-			if allocs := testing.AllocsPerRun(10, fills); allocs != 0 {
-				t.Fatalf("fill allocates %v times once warmed up; want none", allocs)
-			}
-			reads := func() {
-				for _, n := range d.settled {
-					d.Cost(d.nodes[n].ID)
-					d.Parent(d.nodes[n].ID)
-				}
-			}
-			if allocs := testing.AllocsPerRun(10, reads); allocs != 0 {
-				t.Fatalf("reading a fill allocates %v times; want none", allocs)
-			}
-		})
+	d := newPointDijkstra(testmap.Dicts(size)["IndexedSliceDict"]())
+	fills := func() {
+		d.Fill(sources, transitions, nil, nil)
+		if got := d.Fill(sources, transitions, in, targets); got != len(targets) {
+			t.Fatalf("%d targets settled, want %d", got, len(targets))
+		}
+	}
+	fills()
+	if allocs := testing.AllocsPerRun(10, fills); allocs != 0 {
+		t.Fatalf("fill allocates %v times once warmed up; want none", allocs)
+	}
+	reads := func() {
+		for _, n := range d.settled {
+			d.Cost(d.nodes[n].ID)
+			d.Parent(d.nodes[n].ID)
+		}
+	}
+	if allocs := testing.AllocsPerRun(10, reads); allocs != 0 {
+		t.Fatalf("reading a fill allocates %v times; want none", allocs)
 	}
 }
 
