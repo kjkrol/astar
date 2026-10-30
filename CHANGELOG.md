@@ -37,8 +37,9 @@ The public API breaks, yet the version stays 1.x: the module has no user but its
 - `Solver[T]` and `NewSolver(graph, opts...)`: one solver over a `graph.Implicit` (`Forward`,
   `Heuristic`, `Index` and `Size`, `Layout`), made once and shared; `Search[T]`, one a
   goroutine, with `Path`, `Reaches` and `Stats` (`Paths`, `Climbs`, `Exact`, `Expansions`). A
-  warm `Search` allocates nothing, with a `Layout` or without; `ExampleSolver_Search` asks from
-  a pool of workers, a `Search` each, in batches, the graph changed between two.
+  warm `Search` over `Index` and `Size` allocates nothing, with a `Layout` or without;
+  `ExampleSolver_Search` asks from a pool of workers, a `Search` each, in batches, the graph
+  changed between two.
 - HPA* (Hierarchical Path-Finding A*, Botea, Müller and Schaeffer, 2004) where a graph has a
   `Layout`: `Coords`, `At`, `Width` and `Height`, `Backward`. The plane is cut into clusters of
   `WithClusterSide` states a side (16), four by four a level up until the top holds 16 or fewer

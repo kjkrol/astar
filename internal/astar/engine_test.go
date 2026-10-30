@@ -221,25 +221,24 @@ func TestAStar_PrefixWritesTheFirstStates(t *testing.T) {
 	}
 }
 
+// The slice dictionary alone is pinned: a map's clear draws a new hash seed, so a map dictionary
+// may grow its tables on a later search.
 func TestAStar_SolveIntoAllocatesNothing(t *testing.T) {
 	const size = 64
 	grid := testmap.WalledGrid(size)
 	transitions := testmap.FourWays(1.0, grid)
 	start, to := testmap.Point{X: 0, Y: 0}, testmap.Point{X: size - 1, Y: size - 1}
-	for dictName, dict := range testmap.Dicts(size) {
-		t.Run(dictName, func(t *testing.T) {
-			a := pathFinder(dict())
-			path := a.SolveInto(nil, start, to, transitions)
-			verifyPath(t, path, start, to)
-			allocs := testing.AllocsPerRun(10, func() {
-				path = a.SolveInto(path, start, to, transitions)
-			})
-			if allocs != 0 {
-				t.Fatalf("solveInto into a buffer big enough allocates %v times; want none",
-					allocs)
-			}
+	t.Run("IndexedSliceDict", func(t *testing.T) {
+		a := pathFinder(testmap.Dicts(size)["IndexedSliceDict"]())
+		path := a.SolveInto(nil, start, to, transitions)
+		verifyPath(t, path, start, to)
+		allocs := testing.AllocsPerRun(10, func() {
+			path = a.SolveInto(path, start, to, transitions)
 		})
-	}
+		if allocs != 0 {
+			t.Fatalf("solveInto into a buffer big enough allocates %v times; want none", allocs)
+		}
+	})
 	t.Run("Octile", func(t *testing.T) {
 		transitions := testmap.EightWays(grid)
 		a := octileFinder(testmap.Dicts(size)["IndexedSliceDict"]())
