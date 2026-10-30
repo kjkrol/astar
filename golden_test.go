@@ -1,16 +1,17 @@
-package astar_test
+package hpastar_test
 
 import (
 	"bytes"
 	"flag"
 	"fmt"
-	"math"
-	"math/rand/v2"
 	"os"
 	"slices"
 	"testing"
 
-	"github.com/kjkrol/astar"
+	"github.com/kjkrol/hpastar"
+	"github.com/kjkrol/hpastar/graph"
+	"github.com/kjkrol/hpastar/internal/astar"
+	"github.com/kjkrol/hpastar/internal/testmap"
 )
 
 var updatePaths = flag.Bool("update", false, "rewrite testdata/paths.golden")
@@ -22,129 +23,63 @@ type goldenScene struct {
 	name    string
 	grid    [][]float64
 	eight   bool
-	queries [][2]Point
+	queries [][2]testmap.Point
 }
 
 func goldenScenes() []goldenScene {
 	var scenes []goldenScene
 	add := func(name string, grid [][]float64, eight bool, seed uint64) {
-		scenes = append(scenes, goldenScene{name, grid, eight, goldenQueries(grid, seed)})
+		scenes = append(scenes, goldenScene{name, grid, eight, testmap.Queries(grid, seed)})
 	}
-	random := randomGrid(48, 3)
-	add("grid32", setupGrid(32), false, 1)
-	add("grid64", setupGrid(64), false, 2)
+	random := testmap.RandomGrid(48, 3)
+	add("grid32", testmap.WalledGrid(32), false, 1)
+	add("grid64", testmap.WalledGrid(64), false, 2)
 	add("random48-4", random, false, 4)
 	add("random48-8", random, true, 5)
-	add("uniform24-4", uniformGrid(24), false, 6)
-	add("uniform24-8", uniformGrid(24), true, 7)
+	add("uniform24-4", testmap.UniformGrid(24), false, 6)
+	add("uniform24-8", testmap.UniformGrid(24), true, 7)
 	return scenes
 }
 
-// the corners both ways, a cell to itself, the first wall if any, then forty pairs of open cells
-func goldenQueries(grid [][]float64, seed uint64) [][2]Point {
-	size := len(grid)
-	last := Point{X: size - 1, Y: size - 1}
-	queries := [][2]Point{{{}, last}, {last, {}}, {{X: 3, Y: 3}, {X: 3, Y: 3}}}
-	var open []Point
-	wall, walled := Point{}, false
-	for y := range size {
-		for x := range size {
-			if grid[y][x] >= InsurmountableObstacle {
-				if !walled {
-					wall, walled = Point{X: x, Y: y}, true
-				}
-				continue
-			}
-			open = append(open, Point{X: x, Y: y})
-		}
+// the scene's steps and the distance that never overestimates them
+func (s goldenScene) graph() graph.Implicit[testmap.Point] {
+	if s.eight {
+		return graph.Implicit[testmap.Point]{Forward: testmap.EightWays(s.grid),
+			Heuristic: testmap.Octile}
 	}
-	if walled {
-		queries = append(queries, [2]Point{{}, wall})
-	}
-	r := rand.New(rand.NewPCG(seed, seed*7+1))
-	for range 40 {
-		from := open[r.Uint64()%uint64(len(open))]
-		to := open[r.Uint64()%uint64(len(open))]
-		queries = append(queries, [2]Point{from, to})
-	}
-	return queries
+	return graph.Implicit[testmap.Point]{Forward: testmap.FourWays(1.0, s.grid),
+		Heuristic: testmap.Manhattan}
 }
 
-// costs of 1 to 5 and a wall on a fifth of the cells, the corners kept open
-func randomGrid(size int, seed uint64) [][]float64 {
-	r := rand.New(rand.NewPCG(seed, seed*7+1))
-	grid := make([][]float64, size)
-	for y := range size {
-		grid[y] = make([]float64, size)
-		for x := range size {
-			grid[y][x] = float64(1 + r.Uint64()%5)
-			if r.Uint64()%100 < 20 {
-				grid[y][x] = InsurmountableObstacle
-			}
-		}
-	}
-	grid[0][0], grid[size-1][size-1] = 1, 1
-	return grid
-}
-
-func uniformGrid(size int) [][]float64 {
-	grid := make([][]float64, size)
-	for y := range size {
-		grid[y] = make([]float64, size)
-		for x := range size {
-			grid[y][x] = 1
-		}
-	}
-	return grid
-}
-
-// the cost of path over grid as the scene's transitions price it: the cell entered, a
-// slantwise step √2 of it
-func pathCost(grid [][]float64, path []Point) float64 {
-	cost := 0.0
-	for i := 1; i < len(path); i++ {
-		step := grid[path[i].Y][path[i].X]
-		if path[i].X != path[i-1].X && path[i].Y != path[i-1].Y {
-			step *= math.Sqrt2
-		}
-		cost += step
-	}
-	return cost
-}
-
-// every path of every scene, a line a query, equal through all three dictionaries
-func goldenPaths(t *testing.T) []byte {
+// goldenPaths is every path of every scene, a line a query; solvers are the ways of finding a
+// scene's paths, by name, each making its finder anew for a scene, and must agree to the step
+func goldenPaths(t *testing.T,
+	solvers map[string]func(goldenScene) func(from, to testmap.Point) []testmap.Point) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	for _, s := range goldenScenes() {
-		size := len(s.grid)
-		indexer := func(p Point) int { return p.Y*size + p.X }
-		var transitions astar.Transitions[Point]
-		var finder func(...astar.SolverOption[Point]) *astar.Solver[Point]
-		if s.eight {
-			transitions, finder = setupTransitions8(s.grid), setupOctileFinder
-		} else {
-			transitions, finder = setupTransitions(1.0, s.grid), setupPathFinder
-		}
-		solvers := map[string]*astar.Solver[Point]{
-			"DefaultDict":      finder(),
-			"IndexedMapDict":   finder(astar.WithIndexedMapDict(indexer)),
-			"IndexedSliceDict": finder(astar.WithIndexedSliceDict(size*size, indexer)),
+		finders := map[string]func(from, to testmap.Point) []testmap.Point{}
+		var first string
+		for name, solver := range solvers {
+			finders[name] = solver(s)
+			if first == "" || name < first {
+				first = name
+			}
 		}
 		for _, q := range s.queries {
-			path := solvers["IndexedSliceDict"].Solve(q[0], q[1], transitions)
-			for name, solver := range solvers {
-				if got := solver.Solve(q[0], q[1], transitions); !slices.Equal(got, path) {
-					t.Fatalf("%s %v->%v: %s gave %v, the slice dictionary %v",
-						s.name, q[0], q[1], name, got, path)
+			path := finders[first](q[0], q[1])
+			for name, find := range finders {
+				if got := find(q[0], q[1]); !slices.Equal(got, path) {
+					t.Fatalf("%s %v->%v: %s gave %v, %s %v",
+						s.name, q[0], q[1], name, got, first, path)
 				}
 			}
 			fmt.Fprintf(&buf, "%s %d,%d->%d,%d ", s.name, q[0].X, q[0].Y, q[1].X, q[1].Y)
-			if path == nil {
+			if len(path) == 0 {
 				buf.WriteString("none\n")
 				continue
 			}
-			fmt.Fprintf(&buf, "cost=%.6g [", pathCost(s.grid, path))
+			fmt.Fprintf(&buf, "cost=%.6g [", testmap.PathCost(s.grid, path))
 			for i, p := range path {
 				if i > 0 {
 					buf.WriteByte(' ')
@@ -157,8 +92,9 @@ func goldenPaths(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-func TestSolver_PathsAsPinned(t *testing.T) {
-	got := goldenPaths(t)
+// matchesGolden fails t where got differs from the paths pinned, or pins got with -update
+func matchesGolden(t *testing.T, got []byte) {
+	t.Helper()
 	if *updatePaths {
 		if err := os.MkdirAll("testdata", 0o755); err != nil {
 			t.Fatal(err)
@@ -190,4 +126,53 @@ func TestSolver_PathsAsPinned(t *testing.T) {
 				"with -update and says why", i+1, pathsGolden, g, w)
 		}
 	}
+}
+
+func TestAStar_PathsAsPinned(t *testing.T) {
+	solvers := map[string]func(goldenScene) func(from, to testmap.Point) []testmap.Point{}
+	for name := range testmap.Dicts(0) {
+		solvers[name] = func(s goldenScene) func(from, to testmap.Point) []testmap.Point {
+			g := s.graph()
+			a := astar.New(g.Heuristic, testmap.Dicts(len(s.grid))[name](), 0)
+			return func(from, to testmap.Point) []testmap.Point {
+				return a.SolveInto(nil, from, to, g.Forward)
+			}
+		}
+	}
+	matchesGolden(t, goldenPaths(t, solvers))
+}
+
+// the paths of a Solver without a Layout are the engine's, to the step, whichever dictionary its
+// Graph asks for
+func TestSolver_PathWithoutALayoutIsTheEnginesPath(t *testing.T) {
+	graphs := map[string]func(g graph.Implicit[testmap.Point],
+		size int) graph.Implicit[testmap.Point]{
+		"no Index": func(g graph.Implicit[testmap.Point], _ int) graph.Implicit[testmap.Point] {
+			return g
+		},
+		"an Index": func(g graph.Implicit[testmap.Point], size int) graph.Implicit[testmap.Point] {
+			g.Index = func(p testmap.Point) int { return p.Y*size + p.X }
+			return g
+		},
+		"an Index and a Size": func(g graph.Implicit[testmap.Point],
+			size int) graph.Implicit[testmap.Point] {
+			g.Index, g.Size = func(p testmap.Point) int { return p.Y*size + p.X }, size*size
+			return g
+		},
+	}
+	solvers := map[string]func(goldenScene) func(from, to testmap.Point) []testmap.Point{}
+	for name, indexed := range graphs {
+		solvers[name] = func(s goldenScene) func(from, to testmap.Point) []testmap.Point {
+			q := hpastar.NewSolver(indexed(s.graph(), len(s.grid))).Search()
+			dst := make([]testmap.Point, 4*len(s.grid)*len(s.grid))
+			return func(from, to testmap.Point) []testmap.Point {
+				n, ok := q.Path(from, to, dst)
+				if !ok {
+					return nil
+				}
+				return slices.Clone(dst[:n])
+			}
+		}
+	}
+	matchesGolden(t, goldenPaths(t, solvers))
 }
