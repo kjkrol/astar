@@ -11,10 +11,11 @@ import (
 	"github.com/kjkrol/hpastar/internal/heap"
 )
 
-// Climb asks paths of a hierarchy on one goroutine: its own scratch and counters, and the
-// graph's transitions as its caller reads them.
+// Climb asks paths of a hierarchy on one goroutine for one class at a time: its own scratch and
+// counters, and the graph's transitions of the class as its caller reads them.
 type Climb[T comparable] struct {
 	h *Hierarchy[T]
+	v *view[T] // the class asked
 	// the caller's transitions forward, and both ways counting what they expand
 	given             graph.Transitions[T]
 	forward, backward graph.Transitions[T]
@@ -77,9 +78,10 @@ const (
 	NoPath            // no path joins the ends
 )
 
-// NewClimb is a climb of h over forward and backward, which step and price as h's graph does.
+// NewClimb is a climb of h for class 0 over forward and backward, which step and price as h's
+// graph does and leave out the steps the class the climb asks for refuses.
 func (h *Hierarchy[T]) NewClimb(forward, backward graph.Transitions[T]) *Climb[T] {
-	s := &Climb[T]{h: h, given: forward}
+	s := &Climb[T]{h: h, v: &h.views[0], given: forward}
 	s.forward = func(from, prev T, buf []graph.Transition[T]) []graph.Transition[T] {
 		s.expansions++
 		return forward(from, prev, buf)
@@ -103,6 +105,10 @@ func (h *Hierarchy[T]) NewClimb(forward, backward graph.Transitions[T]) *Climb[T
 
 // Expanded is how many states and nodes the climb has expanded.
 func (s *Climb[T]) Expanded() uint64 { return s.expansions }
+
+// Class has the climb ask its next routes and reaches of class k, its transitions giving the
+// steps k takes.
+func (s *Climb[T]) Class(k int) { s.v = &s.h.views[k] }
 
 // Patience is how many states an exact search expands before it asks the labels whether a path
 // joins its ends at all: a few clusters' worth.
@@ -173,7 +179,7 @@ func (s *Climb[T]) Route(from, to T) Verdict {
 func (s *Climb[T]) insert1(f *fill1[T], c int32, st T, steps graph.Transitions[T],
 	costs *[]float64) {
 	q := &s.q
-	cl := &s.h.levels[0].clusters[c]
+	cl := &s.v.levels[0].clusters[c]
 	f.at.set(s.h.block1(c))
 	q.sources = append(q.sources[:0], dijkstra.Source[T]{At: st})
 	f.d.Fill(q.sources, steps, f.in, cl.states)
@@ -190,8 +196,8 @@ func (s *Climb[T]) insert1(f *fill1[T], c int32, st T, steps graph.Transitions[T
 // cs[j-1], at their costs, to its nodes, their costs into costs[j]; back fills toward them
 func (s *Climb[T]) insertK(f *localFill, j int, cs []int32, costs [][]float64, back bool) {
 	h, g := s.h, &s.read.graph
-	dn, cl := &h.levels[j-1], &h.levels[j].clusters[cs[j]]
-	h.readK(g, j, cs[j], back)
+	dn, cl := &h.levels[j-1], &s.v.levels[j].clusters[cs[j]]
+	h.readK(s.v, g, j, cs[j], back)
 	s.locals = grown(s.locals, len(cl.down))
 	for i, r := range cl.down {
 		s.locals[i] = cl.offset[dn.slot[r.c]] + r.i
@@ -213,7 +219,7 @@ func (s *Climb[T]) insertK(f *localFill, j int, cs []int32, costs [][]float64, b
 
 // search runs A* over level j's graph from the start to the goal inserted
 func (s *Climb[T]) search(j int) bool {
-	q, lv := &s.q, &s.h.levels[j]
+	q, lv := &s.q, &s.v.levels[j]
 	sr := &q.searchers[j]
 	if sr.s == nil {
 		sr.at = &placeTop{}
@@ -258,7 +264,7 @@ func (s *Climb[T]) searchFrom(from, _ nodeRef,
 			buf = append(buf, graph.Transition[nodeRef]{To: goalRef, Cost: cost})
 		}
 	}
-	return s.h.edgesOut(j, from, buf)
+	return s.v.edgesOut(j, from, buf)
 }
 
 func (s *Climb[T]) estimate(a, _ nodeRef) float64 {
@@ -274,7 +280,7 @@ func (s *Climb[T]) estimate(a, _ nodeRef) float64 {
 	case startRef:
 		e = s.h.graph.Heuristic(q.from, q.to)
 	default:
-		e = s.h.graph.Heuristic(s.h.levels[q.level].clusters[a.c].states[a.i], q.to)
+		e = s.h.graph.Heuristic(s.v.levels[q.level].clusters[a.c].states[a.i], q.to)
 	}
 	sr.estimate[i], sr.made[i] = e, sr.search
 	return e
@@ -290,7 +296,7 @@ func (s *Climb[T]) Refine(dst []T) int {
 	q.dst, q.wrote = dst, 1
 	dst[0] = q.from
 	j := q.level
-	lv := &s.h.levels[j]
+	lv := &s.v.levels[j]
 	more := q.wrote < len(dst)
 	for t := 0; more && t+1 < len(q.path); t++ {
 		u, v := q.path[t], q.path[t+1]
@@ -320,7 +326,7 @@ func (s *Climb[T]) emit(st T) bool {
 
 // steps writes the route along the nodes w of level j, each step within a cluster refined
 func (s *Climb[T]) steps(j int, w []nodeRef) bool {
-	lv := &s.h.levels[j]
+	lv := &s.v.levels[j]
 	for t := 0; t+1 < len(w); t++ {
 		a, b := w[t], w[t+1]
 		if a.c == b.c {
@@ -340,7 +346,7 @@ func (s *Climb[T]) intra(j int, c, u, v int32) bool {
 		return s.intra1(c, u, v)
 	}
 	h, q := s.h, &s.q
-	cl := &h.levels[j].clusters[c]
+	cl := &s.v.levels[j].clusters[c]
 	walk := q.walks[j][:0]
 	lu, l := h.homeK(j, cl, cl.down[u]), h.homeK(j, cl, cl.down[v])
 	if cl.span > 0 {
@@ -349,7 +355,7 @@ func (s *Climb[T]) intra(j int, c, u, v int32) bool {
 		}
 	} else {
 		// the leg found as the fill that would have grown its tree finds it
-		h.readK(&s.read.graph, j, c, false)
+		h.readK(s.v, &s.read.graph, j, c, false)
 		s.locals = append(s.locals[:0], l)
 		s.leg.run(&s.read.graph, lu, s.locals)
 		s.expansions += uint64(len(s.leg.order))
@@ -383,7 +389,7 @@ func (h *Hierarchy[T]) nodeAt(j int, c int32, cl *cluster[T], l int32) nodeRef {
 // written: along u's tree, or as the fill that would have grown the tree finds it
 func (s *Climb[T]) intra1(c, u, v int32) bool {
 	h, q := s.h, &s.q
-	cl := &h.levels[0].clusters[c]
+	cl := &s.v.levels[0].clusters[c]
 	lu, l := cl.local[u], cl.local[v]
 	walk := q.locals[:0]
 	if cl.span > 0 {
@@ -427,7 +433,7 @@ func (s *Climb[T]) stateAt(c int32, l int32) T {
 // startLeg writes the route from from to node n of from's cluster of level j
 func (s *Climb[T]) startLeg(j int, n int32) bool {
 	h, q := s.h, &s.q
-	cl := &h.levels[j].clusters[q.startC[j]]
+	cl := &s.v.levels[j].clusters[q.startC[j]]
 	if j == 0 {
 		walk := q.states[:0]
 		for st := cl.states[n]; st != q.from; st, _ = q.start.d.Parent(st) {
@@ -455,7 +461,7 @@ func (s *Climb[T]) startLeg(j int, n int32) bool {
 // goalLeg writes the route from node n of to's cluster of level j to to, n written
 func (s *Climb[T]) goalLeg(j int, n int32) bool {
 	h, q := s.h, &s.q
-	cl := &h.levels[j].clusters[q.goalC[j]]
+	cl := &s.v.levels[j].clusters[q.goalC[j]]
 	if j == 0 {
 		for st := cl.states[n]; st != q.to; {
 			st, _ = q.goal.d.Parent(st)
@@ -477,10 +483,11 @@ func (s *Climb[T]) goalLeg(j int, n int32) bool {
 
 // Reaches says whether to can be reached from from, off level 1: true where the nodes from
 // reaches within its cluster and those reaching to within its cluster lie in one component of
-// the level's graph, as its last build labelled them, and where the labels cannot tell.
+// the level's graph, as its last build labelled them for the class, and where the labels cannot
+// tell.
 func (s *Climb[T]) Reaches(from, to T) bool {
 	h, q := s.h, &s.q
-	if h.levels[0].stales > 0 || h.labels.pending() {
+	if h.levels[0].stales > 0 || s.v.labels.pending() {
 		return true
 	}
 	sc, ok := h.cluster1(from)
@@ -507,7 +514,7 @@ func (s *Climb[T]) Reaches(from, to T) bool {
 // joined says whether a node of cluster sc of level 1 the start's insertion reached and one of
 // cluster gc the goal's reached lie in one component, as the labels have it
 func (s *Climb[T]) joined(sc, gc int32) bool {
-	q, lv, alias := &s.q, &s.h.levels[0], s.h.labels.alias
+	q, lv, alias := &s.q, &s.v.levels[0], s.v.labels.alias
 	start, goal := lv.clusters[sc].label, lv.clusters[gc].label
 	q.roots = q.roots[:0]
 	for i, cost := range q.startCost[0] {

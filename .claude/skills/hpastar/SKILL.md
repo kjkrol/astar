@@ -1,6 +1,6 @@
 ---
 name: hpastar
-description: Model solvera hpastar (github.com/kjkrol/hpastar) — korzeń Solver/Search nad kontraktem graph.Implicit, z graph.Layout HPA*; silniki w internal (astar, dijkstra, hierarchy, heap, dict); niezmienniki, pułapki, odrzucone pomysły, pomiar. Czytaj przy zmianie solvera, kontraktu grafu, silników lub hierarchii, i z grama (plugins/navigation), gdy chodzi o to, co planner dostaje od solvera.
+description: Model solvera hpastar (github.com/kjkrol/hpastar) — korzeń Solver/Search nad kontraktem graph.Implicit, z graph.Layout HPA* i klasami (Transition.Refuses, Search.Class); silniki w internal (astar, dijkstra, hierarchy, heap, dict); niezmienniki, pułapki, odrzucone pomysły, pomiar. Czytaj przy zmianie solvera, kontraktu grafu, silników lub hierarchii, i z grama (plugins/navigation), gdy chodzi o to, co planner dostaje od solvera.
 ---
 
 # hpastar
@@ -55,6 +55,22 @@ gram, `plugins/navigation/internal/pathfind`.
 - **Etykiety spójności** zostają, gdy interfejs spójności klastra się nie zmienił. Inaczej idzie
   przenazwanie lokalne, a gdy komponent mógł się rozpaść, całość w krokach. Póki trwa całość,
   `Ready` jest fałszem, a `Reaches` mówi „tak”.
+- **Klasa to graf jej własnych kroków.** Widok klasy k jest co do bitu hierarchią jednej klasy
+  nad grafem bez kroków, których k nie może, a trasy, `Reaches` i rozwinięcia klasy są tamtego
+  Solvera. Każda klasa ma pełny widok (klucze, bliźniaki z jej kosztami, koszty, drzewa,
+  przesunięcia wyżej, etykiety), a indeks węzła jest lokalny dla widoku. Przy jednej klasie
+  `Refuses` nie jest czytane, a budowa liczy te same kroki co przed klasami: wywołujący kalibrują
+  na nich budżet.
+- **Graf czytany raz na klaster.** Maska leży przy każdej krawędzi lokalnej i przejściu przez
+  granicę, kroki stanów za granicą listuje się raz na zadanie, a każda klasa wypełnia się po
+  swojej przefiltrowanej kopii krawędzi, więc drzewo i noga bez drzew wychodzą z tej samej
+  kolejności. Obie strony granicy wybierają wejścia klasy z tych samych danych, więc bliźniaki
+  trafiają w węzły widoku tej samej klasy.
+- Rodzic buduje się od nowa, gdy węzły, ich klasy albo bliźniaki którejkolwiek klasy się
+  zmieniły; `Stale` przechodzi bliźniaki wszystkich widoków.
+- **Budżet drzew na klasę.** `Config.Trees` liczy drzewa każdej klasy osobno, więc klasa trzyma
+  dokładnie te drzewa, które trzymałby Solver jednej klasy nad jej krokami, i rozwija te same
+  stany. Wspinaczka czyta tylko widok klasy zapytania, więc drzewa klasy nie zależą od cudzych.
 
 ## Pułapki
 
@@ -74,6 +90,15 @@ gram, `plugins/navigation/internal/pathfind`.
   generator map zlewa się na arm64 w multiply-add.
 - Przykład godoc nazwany identyfikatorem, którego pakiet nie ma, go/doc po cichu pomija, a vet
   go przepuszcza.
+- Etykiety łączą kroki w obie strony. Maska tylko na wejście do stanu zostawia klasie wyjście z
+  niego, więc `Reaches` mówi „tak” bez ścieżki, a dokładny A* zalewa wszystko, co start osiąga.
+  Graf, który chce dokładnego `Reaches`, odmawia klasie też kroków ze stanu, na którym nie może
+  stanąć.
+- Filtr klasy w `Search` istnieje dopiero od dwóch klas. Przejścia `SearchVia` niosą maski albo
+  same pomijają kroki klasy; `Backward` odbija maski tak jak koszty.
+- Zmianę, którą widzi tylko jedna klasa, łapią testy celowane, nie losowe: zmiany losowe rzadko
+  trafiają w klaster na granicy rodzica, gdzie inna klasa niż 0 zmienia węzły, ich klasy albo
+  same koszty bliźniaków.
 
 ## Odrzucone
 
@@ -81,6 +106,13 @@ gram, `plugins/navigation/internal/pathfind`.
   która z równych ścieżek wychodzi, i tłum w gramie przeplanowuje o 55% więcej.
 - Ponowne wypełnianie tylko wierszy dotkniętych zmianą: wypełnienie od wejścia osiedla prawie
   cały klaster, więc prawie każdy wiersz go dotyka.
+- HAA* (jeden graf abstrakcyjny z pojemnością przejść zamiast widoku na klasę) oszczędza pamięć,
+  ale daje klasom trasy droższe od najtańszych; tu klasa dostaje dokładnie trasy swojego grafu.
+- Gałąź na maskę w `settle` zamiast kopii krawędzi na klasę: maska w najgorętszej pętli budowy,
+  a noga bez drzew musiałaby czytać maski dokładnie tak samo.
+- Wspólny budżet drzew dla wszystkich klas i drzewa klastra dla wszystkich klas albo żadnej:
+  klasy budowane później tracą drzewa, noga szuka zamiast chodzić po drzewie, a rozwinięcia
+  odchodzą od Solvera jednej klasy.
 
 ## Pomiar
 

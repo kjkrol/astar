@@ -23,16 +23,27 @@ var (
 
 // a level of clusters, cols × rows: on level 1 blocks of side × side coordinates, above blocks
 // of factor × factor clusters a level down
-type level[T comparable] struct {
+type level struct {
 	cols, rows int32
-	clusters   []cluster[T]
 	parent     []int32 // by cluster: the cluster a level up holding it; nil on the top
 	slot       []int32 // by cluster: its place in the block of that cluster
 	stale      []staleness
 	stales     int
-	next       int32   // no cluster below it is stale
-	base       []int32 // by cluster and one more: its first node's index among the level's
-	based      bool    // base is up to date
+	next       int32 // no cluster below it is stale
+}
+
+// a class's view of the hierarchy: by level, the clusters as the steps of the class make them,
+// and the labels of its level 1
+type view[T comparable] struct {
+	levels []tier[T]
+	labels labels
+}
+
+// a level of a view: its clusters, by the level's cluster
+type tier[T comparable] struct {
+	clusters []cluster[T]
+	base     []int32 // by cluster and one more: its first node's index among the level's
+	based    bool    // base is up to date
 }
 
 // staleness is what of a cluster a change left to build: nothing, its costs and trees over the
@@ -148,7 +159,7 @@ func (h *Hierarchy[T]) newFill1() fill1[T] {
 	return fill1[T]{d: d, at: at, in: at.within}
 }
 
-// lay cuts the plane into levels of clusters, every one stale
+// lay cuts the plane into levels of clusters, every one stale, each seen by every class
 func (h *Hierarchy[T]) lay() {
 	side, f := h.config.Side, h.config.Factor
 	cols, rows := (h.w+side-1)/side, (h.h+side-1)/side
@@ -157,12 +168,15 @@ func (h *Hierarchy[T]) lay() {
 	}
 	for {
 		n := cols * rows
-		lv := level[T]{cols: int32(cols), rows: int32(rows), clusters: make([]cluster[T], n),
-			stale: make([]staleness, n), stales: n, base: make([]int32, n+1)}
+		lv := level{cols: int32(cols), rows: int32(rows), stale: make([]staleness, n), stales: n}
 		for i := range lv.stale {
 			lv.stale[i] = rebuild
 		}
 		h.levels = append(h.levels, lv)
+		for k := range h.views {
+			h.views[k].levels = append(h.views[k].levels,
+				tier[T]{clusters: make([]cluster[T], n), base: make([]int32, n+1)})
+		}
 		if n <= h.config.Top {
 			break
 		}
@@ -170,8 +184,8 @@ func (h *Hierarchy[T]) lay() {
 	}
 	for j := 0; j+1 < len(h.levels); j++ {
 		lv, up, f := &h.levels[j], &h.levels[j+1], int32(f)
-		lv.parent, lv.slot = make([]int32, len(lv.clusters)), make([]int32, len(lv.clusters))
-		for c := range int32(len(lv.clusters)) {
+		lv.parent, lv.slot = make([]int32, len(lv.stale)), make([]int32, len(lv.stale))
+		for c := range int32(len(lv.stale)) {
 			cx, cy := c%lv.cols, c/lv.cols
 			lv.parent[c], lv.slot[c] = cy/f*up.cols+cx/f, cy%f*f+cx%f
 		}
@@ -180,10 +194,19 @@ func (h *Hierarchy[T]) lay() {
 
 func (h *Hierarchy[T]) prepare() {
 	h.b.fill.heap = heap.New(h.config.Side * h.config.Side)
-	h.labels.whole = true
-	h.labels.at = make([]int32, len(h.levels[0].clusters))
-	for c := range h.labels.at {
-		h.labels.at[c] = -1
+	for k := range h.views {
+		l := &h.views[k].labels
+		l.whole = true
+		l.at = make([]int32, len(h.levels[0].stale))
+		for c := range l.at {
+			l.at[c] = -1
+		}
+	}
+	h.job.was = make([]former, len(h.views))
+	h.trees = make([]int, len(h.views))
+	h.b.locals = make([][]int32, len(h.views))
+	if len(h.views) > 1 {
+		h.b.graphs = make([]localGraph, len(h.views))
 	}
 	h.rebuilds, h.refills = make([]uint64, len(h.levels)), make([]uint64, len(h.levels))
 }
@@ -210,21 +233,29 @@ func (h *Hierarchy[T]) block1(c int32) (x0, y0, x1, y1 int) {
 }
 
 // nodeIndex is the index of the node of key in cluster c of level j
-func (h *Hierarchy[T]) nodeIndex(j int, c int32, key int) (int32, bool) {
-	i, ok := slices.BinarySearch(h.levels[j].clusters[c].keys, key)
+func (v *view[T]) nodeIndex(j int, c int32, key int) (int32, bool) {
+	i, ok := slices.BinarySearch(v.levels[j].clusters[c].keys, key)
 	return int32(i), ok
 }
 
 // based is level j with the index of each cluster's first node among the level's up to date
-func (h *Hierarchy[T]) based(j int) *level[T] {
-	lv := &h.levels[j]
-	if !lv.based {
-		for c := range lv.clusters {
-			lv.base[c+1] = lv.base[c] + int32(len(lv.clusters[c].keys))
+func (v *view[T]) based(j int) *tier[T] {
+	t := &v.levels[j]
+	if !t.based {
+		for c := range t.clusters {
+			t.base[c+1] = t.base[c] + int32(len(t.clusters[c].keys))
 		}
-		lv.based = true
+		t.based = true
 	}
-	return lv
+	return t
+}
+
+// bit is the bit of class k in a step's Refuses, 0 where the graph has one class
+func (h *Hierarchy[T]) bit(k int) uint8 {
+	if h.all == 0 {
+		return 0
+	}
+	return 1 << k
 }
 
 // mark leaves cluster c of level j stale as kind says, unless more of it is stale already; the
@@ -255,9 +286,9 @@ func (h *Hierarchy[T]) nextStale(j int) (int32, bool) {
 }
 
 // edgesOut appends the steps of level j's graph from node from
-func (h *Hierarchy[T]) edgesOut(j int, from nodeRef,
+func (v *view[T]) edgesOut(j int, from nodeRef,
 	buf []graph.Transition[nodeRef]) []graph.Transition[nodeRef] {
-	cl := &h.levels[j].clusters[from.c]
+	cl := &v.levels[j].clusters[from.c]
 	n := int32(len(cl.keys))
 	for w, word := range cl.row(cl.out, from.i) {
 		for ; word != 0; word &= word - 1 {
@@ -270,8 +301,8 @@ func (h *Hierarchy[T]) edgesOut(j int, from nodeRef,
 		if tw.out == inf32 {
 			continue
 		}
-		if v, ok := h.nodeIndex(j, tw.other, tw.key); ok {
-			buf = append(buf, graph.Transition[nodeRef]{To: nodeRef{tw.other, v},
+		if i, ok := v.nodeIndex(j, tw.other, tw.key); ok {
+			buf = append(buf, graph.Transition[nodeRef]{To: nodeRef{tw.other, i},
 				Cost: float64(tw.out)})
 		}
 	}

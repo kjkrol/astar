@@ -7,14 +7,17 @@ import (
 	"github.com/kjkrol/hpastar/internal/hierarchy"
 )
 
-// Search asks a Solver's paths on one goroutine, with memory and counters of its own. The
-// Searches of one Solver may ask at once, never while it changes or updates.
+// Search asks a Solver's paths on one goroutine, for one class at a time, with memory and
+// counters of its own. The Searches of one Solver may ask at once, never while it changes or
+// updates.
 type Search[T comparable] struct {
 	solver  *Solver[T]
 	forward graph.Transitions[T]
 	exact   *astar.Engine[T]    // made the first time a path is searched exactly
 	climb   *hierarchy.Climb[T] // nil without a Layout
 	stats   Stats
+	// the bit of the class asked in a step's Refuses; 0 where the graph has one class
+	bit uint8
 }
 
 // Stats counts what a Search has done.
@@ -72,6 +75,20 @@ func (q *Search[T]) Reaches(from, to T) bool {
 	return e.Found()
 }
 
+// Class has the next Paths and Reaches asked for class k, 0 until it is set, as over a graph of
+// the steps k takes alone. It panics where the graph has no class k.
+func (q *Search[T]) Class(k int) {
+	if k < 0 || k >= max(q.solver.graph.Classes, 1) {
+		panic("hpastar: the graph has no such class")
+	}
+	if q.bit != 0 {
+		q.bit = 1 << k
+	}
+	if q.climb != nil {
+		q.climb.Class(k)
+	}
+}
+
 // Stats is what the Search has done so far.
 func (q *Search[T]) Stats() Stats {
 	st := q.stats
@@ -82,6 +99,24 @@ func (q *Search[T]) Stats() Stats {
 		st.Expansions += q.climb.Expanded()
 	}
 	return st
+}
+
+// taken is steps but for the steps the class asked refuses, nil where steps is
+func (q *Search[T]) taken(steps graph.Transitions[T]) graph.Transitions[T] {
+	if steps == nil {
+		return nil
+	}
+	return func(from, prev T, buf []graph.Transition[T]) []graph.Transition[T] {
+		n := len(buf)
+		buf = steps(from, prev, buf)
+		kept := buf[:n]
+		for _, st := range buf[n:] {
+			if st.Refuses&q.bit == 0 {
+				kept = append(kept, st)
+			}
+		}
+		return kept
+	}
 }
 
 func (q *Search[T]) engine() *astar.Engine[T] {

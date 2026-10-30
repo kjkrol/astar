@@ -50,7 +50,7 @@ func withTop(clusters int) option { return func(c *Config) { c.Top = clusters } 
 // withNear sets how far apart a path's ends lie to climb level 1; 32 by default
 func withNear(distance float64) option { return func(c *Config) { c.Near = distance } }
 
-// withTreeMemory sets the bytes the trees of level 1 may take; 64 MB by default
+// withTreeMemory sets the bytes the trees of level 1 of each class may take; 64 MB by default
 func withTreeMemory(bytes int) option { return func(c *Config) { c.Trees = bytes } }
 
 // clusters is how many clusters level has, from 1
@@ -58,7 +58,7 @@ func (h *Hierarchy[T]) clusters(level int) int {
 	if level < 1 || level > len(h.levels) {
 		return 0
 	}
-	return len(h.levels[level-1].clusters)
+	return len(h.levels[level-1].stale)
 }
 
 // clusterOf is the cluster of s on level, from 1; false for a state without coordinates
@@ -97,7 +97,7 @@ func (s *Climb[T]) cost(from, to T) (float64, bool) {
 func (s *Climb[T]) routeCost() float64 {
 	q := &s.q
 	j := q.level
-	lv := &s.h.levels[j]
+	lv := &s.v.levels[j]
 	total := 0.0
 	for t := 0; t+1 < len(q.path); t++ {
 		u, v := q.path[t], q.path[t+1]
@@ -146,32 +146,40 @@ func mapAStar(m *testmap.Map) *astar.Engine[int] {
 	return astar.New[int](m.Octile, dict.NewIndexedSlice(m.W*m.H, testmap.Identity), 0)
 }
 
-// nodesByLevel is how many nodes each level has
+// nodesByLevel is how many nodes each level has, every class's
 func nodesByLevel[T comparable](h *Hierarchy[T]) []int {
 	counts := make([]int, len(h.levels))
-	for j := range h.levels {
-		for c := range h.levels[j].clusters {
-			counts[j] += len(h.levels[j].clusters[c].keys)
+	for k := range h.views {
+		for j, t := range h.views[k].levels {
+			for c := range t.clusters {
+				counts[j] += len(t.clusters[c].keys)
+			}
 		}
 	}
 	return counts
 }
 
-// bytesOf is what the hierarchy's clusters hold, in bytes
+// bytesOf is what the hierarchy's clusters hold, every class's, in bytes
 func bytesOf[T comparable](h *Hierarchy[T]) int {
 	var state T
 	total := 0
-	for j := range h.levels {
-		for c := range h.levels[j].clusters {
-			cl := &h.levels[j].clusters[c]
-			total += len(cl.keys)*8 + len(cl.states)*int(unsafe.Sizeof(state)) +
-				len(cl.local)*4 + len(cl.down)*8 + len(cl.class)*4 + len(cl.twinAt)*4 +
-				len(cl.twins)*int(unsafe.Sizeof(twin{})) + len(cl.intra)*4 + len(cl.offset)*4 +
-				len(cl.out)*8 + len(cl.in)*8 + len(cl.tree8) + len(cl.tree16)*2
+	for k := range h.views {
+		for _, t := range h.views[k].levels {
+			for c := range t.clusters {
+				cl := &t.clusters[c]
+				total += len(cl.keys)*8 + len(cl.states)*int(unsafe.Sizeof(state)) +
+					len(cl.local)*4 + len(cl.down)*8 + len(cl.class)*4 + len(cl.twinAt)*4 +
+					len(cl.twins)*int(unsafe.Sizeof(twin{})) + len(cl.intra)*4 +
+					len(cl.offset)*4 + len(cl.out)*8 + len(cl.in)*8 + len(cl.tree8) +
+					len(cl.tree16)*2
+			}
 		}
 	}
 	return total
 }
+
+// one is the hierarchy's level j as its only class sees it
+func (h *Hierarchy[T]) one(j int) *tier[T] { return &h.views[0].levels[j] }
 
 func TestHierarchy_ClustersTileThePlane(t *testing.T) {
 	plane := func(w, h int) graph.Implicit[int] {
@@ -266,7 +274,7 @@ func TestHierarchy_AnEntranceStandsOnEveryRun(t *testing.T) {
 		crossings++
 		from := fillWithin(h.Hierarchy, c, a, m.Forward)
 		to := fillWithin(h.Hierarchy, o, b, m.Backward)
-		cl := &h.levels[0].clusters[c]
+		cl := &h.one(0).clusters[c]
 		for i := range cl.keys {
 			if _, ok := from.Cost(cl.states[i]); !ok {
 				continue
@@ -298,7 +306,7 @@ func TestHierarchy_AnEntranceStandsOnEveryRun(t *testing.T) {
 	hu := testHierarchy(u.Graph())
 	hu.Build(math.MaxInt)
 	var rows []int
-	cl := &hu.levels[0].clusters[0]
+	cl := &hu.one(0).clusters[0]
 	for i, s := range cl.states {
 		twins := cl.twins[cl.twinAt[i]:cl.twinAt[i+1]]
 		if x, y, _ := u.Coords(s); x == 15 &&
@@ -313,7 +321,7 @@ func TestHierarchy_AnEntranceStandsOnEveryRun(t *testing.T) {
 
 func TestHierarchy_IntraCostsAreTheDijkstrasCosts(t *testing.T) {
 	m, h := builtOver(1, 256, 0.1, false)
-	lv := &h.levels[0]
+	lv := h.one(0)
 	for c := int32(0); c < int32(len(lv.clusters)); c += 7 {
 		cl := &lv.clusters[c]
 		n := len(cl.keys)
@@ -377,8 +385,8 @@ func TestHierarchy_TwinEdgesAreDirected(t *testing.T) {
 		return inf32
 	}
 	lopsided := 0
-	for c := range h.levels[0].clusters {
-		cl := &h.levels[0].clusters[c]
+	for c := range h.one(0).clusters {
+		cl := &h.one(0).clusters[c]
 		for i, a := range cl.states {
 			for _, tw := range cl.twins[cl.twinAt[i]:cl.twinAt[i+1]] {
 				out, in := cost(m.Forward, a, tw.key), cost(m.Forward, tw.key, a)
@@ -402,8 +410,8 @@ func TestHierarchy_TwinEdgesAreDirected(t *testing.T) {
 	ho := testHierarchy(g)
 	ho.Build(math.MaxInt)
 	oneway := 0
-	for c := range ho.levels[0].clusters {
-		cl := &ho.levels[0].clusters[c]
+	for c := range ho.one(0).clusters {
+		cl := &ho.one(0).clusters[c]
 		for i, a := range cl.states {
 			for _, tw := range cl.twins[cl.twinAt[i]:cl.twinAt[i+1]] {
 				if a%64 == 15 && tw.key%64 == 16 {
@@ -437,12 +445,12 @@ func TestHierarchy_TwinEdgesAreDirected(t *testing.T) {
 
 func TestHierarchy_ALevelAboveIsBuiltOverTheLevelBelow(t *testing.T) {
 	m, h := builtOver(1, 256, 0.1, false)
-	up, dn := &h.levels[1], &h.levels[0]
-	for c := range int32(len(up.clusters)) {
-		cl := &up.clusters[c]
+	up, dn, below := &h.levels[1], &h.levels[0], h.one(0)
+	for c := range int32(len(h.one(1).clusters)) {
+		cl := &h.one(1).clusters[c]
 		n := len(cl.keys)
 		for i, r := range cl.down {
-			if dn.clusters[r.c].keys[r.i] != cl.keys[i] || dn.parent[r.c] != c {
+			if below.clusters[r.c].keys[r.i] != cl.keys[i] || dn.parent[r.c] != c {
 				t.Fatalf("cluster %d's node %d is no node of its children", c, i)
 			}
 			if slices.ContainsFunc(cl.twins[cl.twinAt[i]:cl.twinAt[i+1]],
@@ -454,7 +462,7 @@ func TestHierarchy_ALevelAboveIsBuiltOverTheLevelBelow(t *testing.T) {
 			d := dijkstra.New[nodeRef](dict.NewMap[nodeRef](0), 0)
 			d.Fill([]dijkstra.Source[nodeRef]{{At: cl.down[i]}},
 				func(from, _ nodeRef, buf []graph.Transition[nodeRef]) []graph.Transition[nodeRef] {
-					return h.edgesOut(0, from, buf)
+					return h.views[0].edgesOut(0, from, buf)
 				}, func(r nodeRef) bool { return dn.parent[r.c] == c }, nil)
 			base := dijkstra.New[int](dict.NewMap[int](0), 0)
 			x0, y0 := int(c%up.cols)*64, int(c/up.cols)*64
@@ -565,7 +573,7 @@ func TestHierarchy_RoutesCostWithinABoundOfAStar(t *testing.T) {
 			t.Logf("%d²: levels %d, clusters %v, nodes %v, %.1f MB (trees %.1f MB); "+
 				"cost ratio mean %.4f, worst %.4f", c.size, len(h.levels),
 				clustersByLevel(h.Hierarchy), nodesByLevel(h.Hierarchy),
-				float64(bytesOf(h.Hierarchy))/(1<<20), float64(h.trees)/(1<<20), mean, most)
+				float64(bytesOf(h.Hierarchy))/(1<<20), float64(h.trees[0])/(1<<20), mean, most)
 		})
 	}
 }
@@ -845,14 +853,15 @@ func TestHierarchy_BuildKeepsToItsBudget(t *testing.T) {
 		if h.worked < 1 || h.worked-h.stepWorked >= budget || h.stepWorked < 1 {
 			t.Fatalf("a build of %d did %d, its last step %d", budget, h.worked, h.stepWorked)
 		}
-		if h.rebuilds[1] > 0 && (h.rebuilds[0] != uint64(h.clusters(1)) || h.labels.made == 0) {
+		if h.rebuilds[1] > 0 && (h.rebuilds[0] != uint64(h.clusters(1)) ||
+			h.views[0].labels.made == 0) {
 			t.Fatal("a cluster of level 2 built before level 1 and its labels are")
 		}
 		sum += built
 		if stale := h.levels[0].stales + h.levels[1].stales; left != stale &&
-			left != stale+1 || left == stale+1 && !h.labels.pending() {
+			left != stale+1 || left == stale+1 && !h.views[0].labels.pending() {
 			t.Fatalf("%d left with %d clusters stale, labels pending %v", left, stale,
-				h.labels.pending())
+				h.views[0].labels.pending())
 		}
 	}
 	if sum != total || h.builds != uint64(total) || calls <= total {
@@ -865,10 +874,11 @@ func TestHierarchy_BuildKeepsToItsBudget(t *testing.T) {
 	if h.Ready() || h.levels[0].stales != h.clusters(1) || h.levels[1].stales != 0 {
 		t.Fatal("staleAll left a cluster of level 1 built, or marked one above")
 	}
-	if built, left := h.Build(0); built != h.clusters(1) || left != 0 || h.labels.made != 1 ||
-		h.labels.local != 0 || h.rebuilds[1]+h.refills[1] != uint64(h.clusters(2)) {
+	l := &h.views[0].labels
+	if built, left := h.Build(0); built != h.clusters(1) || left != 0 || l.made != 1 ||
+		l.local != 0 || h.rebuilds[1]+h.refills[1] != uint64(h.clusters(2)) {
 		t.Fatalf("built %d, %d left, labelled %d and %d times, level 2 built %d and filled %d "+
-			"times; want level 1 alone", built, left, h.labels.made, h.labels.local,
+			"times; want level 1 alone", built, left, l.made, l.local,
 			h.rebuilds[1], h.refills[1])
 	}
 }
@@ -907,14 +917,14 @@ func TestHierarchy_TheSameGraphWhicheverOrderItIsBuiltIn(t *testing.T) {
 
 func TestHierarchy_TreesOverTheirMemorySearchTheirLegs(t *testing.T) {
 	m, h := builtOver(1, 256, 0.1, false)
-	if h.trees == 0 {
+	if h.trees[0] == 0 {
 		t.Fatal("no trees kept under the default memory")
 	}
-	for _, trees := range []int{0, h.trees / 3} {
+	for _, trees := range []int{0, h.trees[0] / 3} {
 		o := testHierarchy(m.Graph(), withTreeMemory(trees))
 		o.Build(math.MaxInt)
-		if o.trees > trees {
-			t.Fatalf("%d bytes of trees kept under %d", o.trees, trees)
+		if o.trees[0] > trees {
+			t.Fatalf("%d bytes of trees kept under %d", o.trees[0], trees)
 		}
 		a, b := make([]int, m.W*m.H), make([]int, m.W*m.H)
 		for _, p := range m.Pairs(15, 60, 64, math.Inf(1)) {
@@ -975,53 +985,14 @@ func TestHierarchy_BuildAllocatesNothingTwice(t *testing.T) {
 	if allocs := testing.AllocsPerRun(2, rebuild); allocs != 0 {
 		t.Fatalf("a build of every cluster allocates %v times the second time", allocs)
 	}
-	if h.labels.local == 0 {
+	if h.views[0].labels.local == 0 {
 		t.Fatal("the labels of the two clusters changed never worked out alone")
 	}
 }
 
-// hexes walks m's cells as a parallelogram of axial hexagons: six neighbours each, a step
-// priced as m prices its own
-func hexes(m *testmap.Map) graph.Implicit[int] {
-	dirs := [6][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, -1}, {-1, 1}}
-	steps := func(from int, back bool, buf []graph.Transition[int]) []graph.Transition[int] {
-		buf = buf[:0]
-		q, r := from%m.W, from/m.W
-		if back && m.Share[from] == 0 {
-			return buf
-		}
-		for _, d := range dirs {
-			nq, nr := q+d[0], r+d[1]
-			if nq < 0 || nr < 0 || nq >= m.W || nr >= m.H || m.Share[nr*m.W+nq] == 0 {
-				continue
-			}
-			n, entered := nr*m.W+nq, nr*m.W+nq
-			if back {
-				entered = from
-			}
-			buf = append(buf, graph.Transition[int]{To: n, Cost: 1 / float64(m.Share[entered])})
-		}
-		return buf
-	}
-	g := m.Graph()
-	g.Forward = func(from, _ int, buf []graph.Transition[int]) []graph.Transition[int] {
-		return steps(from, false, buf)
-	}
-	g.Layout.Backward = func(to, _ int, buf []graph.Transition[int]) []graph.Transition[int] {
-		return steps(to, true, buf)
-	}
-	g.Heuristic = func(a, b int) float64 {
-		dq, dr := a%m.W-b%m.W, a/m.W-b/m.W
-		return float64(max(absInt(dq), absInt(dr), absInt(dq+dr)))
-	}
-	return g
-}
-
-func absInt(x int) int { return max(x, -x) }
-
 func TestHierarchy_RoutesOnAHexGrid(t *testing.T) {
 	m := testmap.New(11, 160, 0.08, false)
-	g := hexes(m)
+	g := m.Hex()
 	h := testHierarchy(g)
 	h.Build(math.MaxInt)
 	mean, most := boundByAStar(t, m, h, g, m.Pairs(12, 80, 48, math.Inf(1)), 1.15)
@@ -1034,7 +1005,7 @@ func TestHierarchy_RoutesOnATorus(t *testing.T) {
 	h := testHierarchy(m.Graph())
 	h.Build(math.MaxInt)
 	seams := 0
-	for _, tw := range h.levels[0].clusters[0].twins {
+	for _, tw := range h.one(0).clusters[0].twins {
 		cols := h.levels[0].cols
 		if c := tw.other; c == cols-1 || c == int32(h.clusters(1))-cols {
 			seams++
@@ -1141,11 +1112,11 @@ func TestHierarchy_StatesSharingAPlaceAreRoutedApart(t *testing.T) {
 	h.Build(math.MaxInt)
 	for _, x := range []int{47, 48} {
 		c, _ := h.clusterOf(1, 20*96+x)
-		if cl := &h.levels[0].clusters[c]; cl.layers != 2 || len(cl.tree16) == 0 {
+		if cl := &h.one(0).clusters[c]; cl.layers != 2 || len(cl.tree16) == 0 {
 			t.Fatalf("the cluster under the deck at %d: %d layers, %d trees of two bytes",
 				x, cl.layers, len(cl.tree16))
 		}
-		cl := &h.levels[0].clusters[c]
+		cl := &h.one(0).clusters[c]
 		if !slices.ContainsFunc(cl.keys, func(k int) bool { return k >= d.deck }) {
 			t.Fatalf("no entrance on the deck at %d", x)
 		}
@@ -1479,13 +1450,14 @@ func TestHierarchy_AClimbCountsItsOwn(t *testing.T) {
 	}
 }
 
-// the labels' names, by cluster of level 1 and node, as the climbs read them
-func namesOf[T comparable](h *Hierarchy[T]) [][]int32 {
+// the labels' names of class k, by cluster of level 1 and node, as the climbs read them
+func namesOf[T comparable](h *Hierarchy[T], k int) [][]int32 {
 	var names [][]int32
-	for c := range h.levels[0].clusters {
+	v := &h.views[k]
+	for c := range v.levels[0].clusters {
 		var row []int32
-		for _, n := range h.levels[0].clusters[c].label {
-			row = append(row, h.labels.alias[n])
+		for _, n := range v.levels[0].clusters[c].label {
+			row = append(row, v.labels.alias[n])
 		}
 		names = append(names, row)
 	}
@@ -1495,21 +1467,22 @@ func namesOf[T comparable](h *Hierarchy[T]) [][]int32 {
 func TestHierarchy_ReachesReadsLabelsBuilt(t *testing.T) {
 	m := testmap.New(16, 128, 0.1, false)
 	h := testHierarchy(m.Graph())
-	if h.labels.made != 0 {
+	l := &h.views[0].labels
+	if l.made != 0 {
 		t.Fatal("labels worked out before anything is built")
 	}
 	h.Build(math.MaxInt)
-	if h.labels.made != 1 || h.labels.pending() {
+	if l.made != 1 || l.pending() {
 		t.Fatalf("labels worked out %d times by the build, pending %v; want once and done",
-			h.labels.made, h.labels.pending())
+			l.made, l.pending())
 	}
-	names := namesOf(h.Hierarchy)
+	names := namesOf(h.Hierarchy, 0)
 	s := h.NewClimb(m.Forward, m.Backward)
 	for _, p := range m.Pairs(49, 200, 0, math.Inf(1)) {
 		h.own.Reaches(p[0], p[1])
 		s.Reaches(p[0], p[1])
 	}
-	if h.labels.made != 1 || !slices.EqualFunc(names, namesOf(h.Hierarchy), slices.Equal) {
+	if l.made != 1 || !slices.EqualFunc(names, namesOf(h.Hierarchy, 0), slices.Equal) {
 		t.Fatal("reaches wrote the labels")
 	}
 	// a changed cell on the corner of four clusters: nothing labelled until all four are built
@@ -1518,7 +1491,7 @@ func TestHierarchy_ReachesReadsLabelsBuilt(t *testing.T) {
 	m.Share[c] = 0
 	h.Stale(c)
 	h.own.Reaches(c, 0)
-	labelled := func() uint64 { return h.labels.made + h.labels.local }
+	labelled := func() uint64 { return l.made + l.local }
 	if labelled() != 1 {
 		t.Fatal("reaches labelled while level 1 is stale")
 	}
@@ -1532,15 +1505,16 @@ func TestHierarchy_ReachesReadsLabelsBuilt(t *testing.T) {
 	}
 }
 
-// samePartition fails t where the labels of h and o part the nodes of level 1 otherwise: two
-// nodes one names alike the other names apart
-func samePartition[T comparable](t *testing.T, h, o *Hierarchy[T]) {
+// samePartition fails t where the labels of h's class k and o's class ko part the nodes of level
+// 1 otherwise: two nodes one names alike the other names apart
+func samePartition[T comparable](t *testing.T, h *Hierarchy[T], k int, o *Hierarchy[T], ko int) {
 	t.Helper()
 	there, back := map[int32]int32{}, map[int32]int32{}
-	for c := range h.levels[0].clusters {
-		a, b := &h.levels[0].clusters[c], &o.levels[0].clusters[c]
+	hv, ov := &h.views[k], &o.views[ko]
+	for c := range hv.levels[0].clusters {
+		a, b := &hv.levels[0].clusters[c], &ov.levels[0].clusters[c]
 		for i := range a.keys {
-			x, y := h.labels.alias[a.label[i]], o.labels.alias[b.label[i]]
+			x, y := hv.labels.alias[a.label[i]], ov.labels.alias[b.label[i]]
 			if w, ok := there[x]; ok && w != y {
 				t.Fatalf("cluster %d's node %d: named with nodes the labels whole name apart", c, i)
 			}
@@ -1600,7 +1574,7 @@ func TestHierarchy_LabelsFollowEveryChange(t *testing.T) {
 			fresh := testHierarchy(g)
 			fresh.Build(0)
 			sameGraph(t, h.Hierarchy, fresh.Hierarchy)
-			samePartition(t, h.Hierarchy, fresh.Hierarchy)
+			samePartition(t, h.Hierarchy, 0, fresh.Hierarchy, 0)
 			for _, p := range m.Pairs(uint64(round), 30, 0, math.Inf(1)) {
 				want := exact.SolveInto(nil, p[0], p[1], m.Forward) != nil
 				if got := h.own.Reaches(p[0], p[1]); got != want {
@@ -1609,10 +1583,11 @@ func TestHierarchy_LabelsFollowEveryChange(t *testing.T) {
 				}
 			}
 		}
-		if h.labels.local == 0 || h.labels.made < 2 {
-			t.Fatalf("wrap %v: labelled alone %d times, whole %d; want both", wrap,
-				h.labels.local, h.labels.made)
+		l := &h.views[0].labels
+		if l.local == 0 || l.made < 2 {
+			t.Fatalf("wrap %v: labelled alone %d times, whole %d; want both", wrap, l.local,
+				l.made)
 		}
-		t.Logf("wrap %v: labelled alone %d times, whole %d", wrap, h.labels.local, h.labels.made)
+		t.Logf("wrap %v: labelled alone %d times, whole %d", wrap, l.local, l.made)
 	}
 }

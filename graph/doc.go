@@ -10,4 +10,8 @@
 // while an inconsistent one may have a closed state opened again, which the search does; a step
 // refused is a Transition not generated. A Heuristic scaled above the cheapest cost left
 // (Weighted A*) expands fewer states and trades the cheapest path for one found sooner.
+//
+// A graph may serve several classes of search at once (Implicit.Classes): a step some of them
+// cannot take is a Transition with their bits in its Refuses, and a search of class k finds the
+// paths a graph of the steps k takes alone would give.
 package graph

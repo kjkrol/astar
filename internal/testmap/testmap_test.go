@@ -153,3 +153,90 @@ func TestMaps_OctileNeverOverestimatesAStep(t *testing.T) {
 		}
 	}
 }
+
+// mirrored fails t where g's Backward does not list every step of its Forward between the
+// states its Layout lists, at its cost and refused to its classes, and nothing more
+func mirrored(t *testing.T, name string, g graph.Implicit[int]) {
+	t.Helper()
+	var states []int
+	for y := range g.Layout.Height {
+		for x := range g.Layout.Width {
+			states = g.Layout.At(x, y, states)
+		}
+	}
+	into := make(map[[2]int]graph.Transition[int])
+	for _, s := range states {
+		for _, step := range g.Forward(s, s, nil) {
+			into[[2]int{s, step.To}] = step
+		}
+	}
+	mirrored := 0
+	for _, s := range states {
+		for _, step := range g.Layout.Backward(s, s, nil) {
+			fwd, ok := into[[2]int{step.To, s}]
+			if !ok || fwd.Cost != step.Cost || fwd.Refuses != step.Refuses {
+				t.Fatalf("%s: backward has %d → %d at %v refused %b, forward %+v (%v)", name,
+					step.To, s, step.Cost, step.Refuses, fwd, ok)
+			}
+			mirrored++
+		}
+	}
+	if mirrored != len(into) {
+		t.Fatalf("%s: %d steps backward, %d forward", name, mirrored, len(into))
+	}
+}
+
+func TestMaps_MasksMirrorBothWays(t *testing.T) {
+	m := New(7, 64, 0.1, false)
+	bars := m.Bars(1, 3, 0.2, nil)
+	refuse := func(from, to int) uint8 { return uint8(Hashed(2, from, to) * 8) }
+	mirrored(t, "barred", m.Barred(3, bars))
+	mirrored(t, "hex", Masked(m.Hex(), 3, refuse))
+	mirrored(t, "layered", Masked(m.Layered(20, 10, 30), 3, refuse))
+	mirrored(t, "a class of hex", Filtered(Masked(m.Hex(), 3, refuse), 2))
+}
+
+func TestMaps_FilteredTakesWhatItsClassTakes(t *testing.T) {
+	m := New(8, 64, 0.1, false)
+	g := Masked(m.Graph(), 3, func(from, to int) uint8 { return uint8(Hashed(3, from, to) * 8) })
+	for k := range 3 {
+		f := Filtered(g, k)
+		if f.Classes != 0 {
+			t.Fatalf("class %d: a graph of %d classes", k, f.Classes)
+		}
+		for s := range 64 * 64 {
+			var kept []graph.Transition[int]
+			for _, step := range g.Forward(s, s, nil) {
+				if step.Refuses&(1<<k) == 0 {
+					step.Refuses = 0
+					kept = append(kept, step)
+				}
+			}
+			if got := f.Forward(s, s, nil); !slices.Equal(got, kept) {
+				t.Fatalf("class %d, from %d: %v, want %v", k, s, got, kept)
+			}
+		}
+	}
+}
+
+func TestMaps_BarsSpareClass0AndNest(t *testing.T) {
+	m := New(9, 128, 0, false)
+	bars := m.Bars(4, 4, 0.3, func(x, y int) bool { return x < 64 })
+	barred := 0
+	for s, b := range bars {
+		x, _, _ := m.Coords(s)
+		if b&1 != 0 || b != 0 && x >= 64 {
+			t.Fatalf("state %d barred %04b", s, b)
+		}
+		// every class from the least barred up
+		if b != 0 && b|(b-1) != 0b1111 {
+			t.Fatalf("state %d barred %04b, classes apart", s, b)
+		}
+		if b != 0 {
+			barred++
+		}
+	}
+	if got := float64(barred) / float64(64*128); got < 0.25 || got > 0.35 {
+		t.Fatalf("%.3f of the states within barred, want about 0.3", got)
+	}
+}

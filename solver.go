@@ -13,11 +13,14 @@ type Solver[T comparable] struct {
 }
 
 // NewSolver is a Solver over g, its hierarchy laid out where g has a Layout but built by Update
-// alone. It panics where g lacks Forward or Heuristic, or has a Layout lacking Coords, At,
-// Backward, a plane or the graph's Index.
+// alone. It panics where g lacks Forward or Heuristic, has more than 8 classes, or has a Layout
+// lacking Coords, At, Backward, a plane or the graph's Index.
 func NewSolver[T comparable](g graph.Implicit[T], opts ...Option) *Solver[T] {
 	if g.Forward == nil || g.Heuristic == nil {
 		panic("hpastar: a graph needs Forward and Heuristic")
+	}
+	if g.Classes < 0 || g.Classes > 8 {
+		panic("hpastar: a graph serves from 0 to 8 classes")
 	}
 	s := &Solver[T]{graph: g}
 	if l := g.Layout; l != nil {
@@ -31,8 +34,8 @@ func NewSolver[T comparable](g graph.Implicit[T], opts ...Option) *Solver[T] {
 }
 
 // Changed marks for Update the clusters a change to the steps from or into state may alter, the
-// graph already changed: state's own and those across the borders it lies on. Without a Layout
-// it does nothing.
+// classes a step refuses among them, the graph already changed: state's own and those across the
+// borders it lies on. Without a Layout it does nothing.
 func (s *Solver[T]) Changed(state T) {
 	if s.h != nil {
 		s.h.Stale(state)
@@ -62,20 +65,26 @@ func (s *Solver[T]) Update(budget int) (built, left int) {
 // without a Layout it is always true.
 func (s *Solver[T]) Ready() bool { return s.h == nil || s.h.Ready() }
 
-// Search is a Search over the graph's own steps.
+// Search is a Search over the graph's own steps, for class 0.
 func (s *Solver[T]) Search() *Search[T] { return s.SearchVia(nil, nil) }
 
-// SearchVia is a Search over forward and backward, read as its goroutine reads them, which step
-// and price as the graph's do, in the same order; a nil one takes the graph's.
+// SearchVia is a Search for class 0 over forward and backward, read as its goroutine reads them,
+// which step and price as the graph's do, in the same order, but may leave out the steps the
+// Search's class refuses; a nil one takes the graph's.
 func (s *Solver[T]) SearchVia(forward, backward graph.Transitions[T]) *Search[T] {
 	if forward == nil {
 		forward = s.graph.Forward
 	}
-	q := &Search[T]{solver: s, forward: forward}
+	q := &Search[T]{solver: s}
+	if s.h != nil && backward == nil {
+		backward = s.graph.Layout.Backward
+	}
+	if s.graph.Classes > 1 {
+		q.bit = 1
+		forward, backward = q.taken(forward), q.taken(backward)
+	}
+	q.forward = forward
 	if s.h != nil {
-		if backward == nil {
-			backward = s.graph.Layout.Backward
-		}
 		q.climb = s.h.NewClimb(forward, backward)
 	}
 	return q

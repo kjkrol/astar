@@ -10,19 +10,24 @@ import (
 
 // Hierarchy is HPA* over a graph laid out in a plane: levels of clusters, entrances on their
 // borders, the costs and trees between them computed once a cluster, an abstract search on the
-// highest level the ends' distance allows and the path refined down the trees. It is built on
-// one goroutine, a budget of work at a time, one job after another; its climbs may ask at once.
+// highest level the ends' distance allows and the path refined down the trees, each of these
+// for every class of the graph apart. It is built on one goroutine, a budget of work at a time,
+// one job after another; its climbs may ask at once.
 type Hierarchy[T comparable] struct {
 	graph  graph.Implicit[T]
 	layout graph.Layout[T]
 	config Config
 	w, h   int
-	levels []level[T]
-	// the bytes the trees of level 1 take
-	trees  int
+	levels []level
+	// by class: the clusters as its steps make them, and its labels
+	views []view[T]
+	// the bits of the classes in a step's Refuses; 0 where the graph has one class, whose steps
+	// are read as every class's
+	all uint8
+	// by class: the bytes its trees of level 1 take
+	trees  []int
 	builds uint64
 	b      builder[T]
-	labels labels
 	job    job
 	// the work the last build did, and the work of its last step
 	worked, stepWorked int
@@ -43,7 +48,8 @@ const (
 )
 
 // a job is what a build has under way: a cluster built in steps (made ready, filled from one
-// node a step, sparsified a node's row a step, finished) or the labels worked out
+// node of one class a step, sparsified a node's row a step, finished) or the labels of a class
+// worked out
 type job struct {
 	phase phase
 	j     int
@@ -51,16 +57,24 @@ type job struct {
 	kind  staleness
 	// the staleness the cluster was marked with again while the job was under way
 	again staleness
+	// the class of the next fill or row, or of the labels
+	k int
 	// the next fill or row, or the next cluster of the labels
 	i    int32
 	took time.Duration
-	// the cluster as it was before the job
+	// by class: the cluster's view as it was before the job
+	was []former
+	// the clusters its twins led to before the job, every class's
+	across []int32
+}
+
+// a cluster of a view as it was before a job built it
+type former struct {
 	keys   []int
 	class  []int32
 	twinAt []int32
 	twins  []twin
 	intra  []float32
-	across []int32
 }
 
 type phase uint8
@@ -85,14 +99,20 @@ type Config struct {
 	Factor int     // the clusters a side of a cluster a level up
 	Top    int     // the most clusters the top level may have
 	Span   int     // a border keeps its cheapest crossing every Span coordinates, twice a level up
-	Trees  int     // the bytes the first level's trees may take
+	Trees  int     // the bytes the first level's trees of each class may take
 	Near   float64 // how far apart, by the Heuristic, ends lie to climb, Factor times a level up
 }
 
-// New is the hierarchy of shape c over g, whose Layout its caller checked, nothing built yet.
+// New is the hierarchy of shape c over g, whose Layout and classes its caller checked, nothing
+// built yet.
 func New[T comparable](g graph.Implicit[T], c Config) *Hierarchy[T] {
 	h := &Hierarchy[T]{graph: g, layout: *g.Layout, config: c}
 	h.w, h.h = h.layout.Width, h.layout.Height
+	classes := max(g.Classes, 1)
+	h.views = make([]view[T], classes)
+	if classes > 1 {
+		h.all = uint8(1<<classes - 1)
+	}
 	h.lay()
 	h.prepare()
 	return h
@@ -123,24 +143,28 @@ func (h *Hierarchy[T]) Stale(s T) {
 			}
 		}
 	}
-	cl := &h.levels[0].clusters[c]
-	if i, ok := h.nodeIndex(0, c, h.graph.Index(s)); ok {
-		for _, tw := range cl.twins[cl.twinAt[i]:cl.twinAt[i+1]] {
-			h.mark(0, tw.other, rebuild)
+	key := h.graph.Index(s)
+	for k := range h.views {
+		v := &h.views[k]
+		cl := &v.levels[0].clusters[c]
+		if i, ok := v.nodeIndex(0, c, key); ok {
+			for _, tw := range cl.twins[cl.twinAt[i]:cl.twinAt[i+1]] {
+				h.mark(0, tw.other, rebuild)
+			}
 		}
 	}
 }
 
 // StaleAll marks every cluster of level 1 to be built again.
 func (h *Hierarchy[T]) StaleAll() {
-	for c := range h.levels[0].clusters {
+	for c := range h.levels[0].stale {
 		h.mark(0, int32(c), rebuild)
 	}
 }
 
 // Build works through up to budget steps of work, all that is stale for a budget of 0, and
-// reports how many clusters it finished and how many stay stale, the labels counted as one while
-// they are worked out; it stops after the step that spends the budget.
+// reports how many clusters it finished and how many stay stale, the labels of every class
+// counted as one while they are worked out; it stops after the step that spends the budget.
 func (h *Hierarchy[T]) Build(budget int) (built, left int) {
 	if budget <= 0 {
 		budget = math.MaxInt
@@ -172,34 +196,47 @@ func (h *Hierarchy[T]) Build(budget int) (built, left int) {
 	}
 	// what the climbs read and would otherwise work out themselves
 	for j := range h.levels {
-		h.based(j)
+		for k := range h.views {
+			h.views[k].based(j)
+		}
 		left += h.levels[j].stales
 	}
-	if h.labels.pending() {
+	if _, ok := h.pendingLabels(); ok {
 		left++
 	}
 	return built, left
 }
 
-// Ready says no cluster is stale and the labels are worked out.
+// Ready says no cluster is stale and the labels of every class are worked out.
 func (h *Hierarchy[T]) Ready() bool {
 	for j := range h.levels {
 		if h.levels[j].stales > 0 {
 			return false
 		}
 	}
-	return !h.labels.pending()
+	_, pending := h.pendingLabels()
+	return !pending
+}
+
+// pendingLabels is the first class whose labels are not worked out for level 1 as it is
+func (h *Hierarchy[T]) pendingLabels() (int, bool) {
+	for k := range h.views {
+		if h.views[k].labels.pending() {
+			return k, true
+		}
+	}
+	return 0, false
 }
 
 // next starts the job to do next, false where none is left: a stale cluster of level 1, then the
-// labels, then a stale cluster of the lowest level above, in cluster order
+// labels of each class in turn, then a stale cluster of the lowest level above, in cluster order
 func (h *Hierarchy[T]) next() bool {
 	if c, ok := h.nextStale(0); ok {
 		h.begin(0, c)
 		return true
 	}
-	if h.labels.pending() {
-		h.beginLabels()
+	if k, ok := h.pendingLabels(); ok {
+		h.beginLabels(k)
 		return true
 	}
 	for j := 1; j < len(h.levels); j++ {
@@ -215,8 +252,8 @@ func (h *Hierarchy[T]) next() bool {
 // is done
 func (h *Hierarchy[T]) begin(j int, c int32) {
 	jb := &h.job
-	jb.phase, jb.j, jb.c, jb.kind, jb.again, jb.i, jb.took =
-		preparing, j, c, h.levels[j].stale[c], fresh, 0, 0
+	jb.phase, jb.j, jb.c, jb.kind, jb.again, jb.k, jb.i, jb.took =
+		preparing, j, c, h.levels[j].stale[c], fresh, 0, 0, 0
 }
 
 // step does the next step of the job under way, and reports its work and whether the job is done
@@ -225,22 +262,31 @@ func (h *Hierarchy[T]) step() (work int, done bool) {
 	switch jb.phase {
 	case preparing:
 		work = h.prepareJob()
-		jb.phase, jb.i = filling, 0
-		if len(h.levels[jb.j].clusters[jb.c].keys) == 0 {
+		jb.phase, jb.k, jb.i = filling, 0, 0
+		if !h.nodesLeft() {
 			jb.phase = finishing
 		}
 	case filling:
-		cl := &h.levels[jb.j].clusters[jb.c]
-		work = h.fillRow(cl, h.locals(), int(jb.i))
+		cl := h.under(jb.k)
+		work = h.fillRow(cl, h.fillGraph(jb.k), h.locals(jb.k), int(jb.i))
 		if jb.i++; int(jb.i) == len(cl.keys) {
-			sparsifyStart(cl)
-			jb.phase, jb.i = sparsifying, 0
+			if jb.k, jb.i = jb.k+1, 0; !h.nodesLeft() {
+				for k := range h.views {
+					if cl := h.under(k); len(cl.keys) > 0 {
+						sparsifyStart(cl)
+					}
+				}
+				jb.phase, jb.k = sparsifying, 0
+				h.nodesLeft()
+			}
 		}
 	case sparsifying:
-		cl := &h.levels[jb.j].clusters[jb.c]
+		cl := h.under(jb.k)
 		work = 1 + sparsifyRow(cl, int(jb.i))/workChecks
 		if jb.i++; int(jb.i) == len(cl.keys) {
-			jb.phase = finishing
+			if jb.k, jb.i = jb.k+1, 0; !h.nodesLeft() {
+				jb.phase = finishing
+			}
 		}
 	case finishing:
 		return h.finish(), true
@@ -250,84 +296,131 @@ func (h *Hierarchy[T]) step() (work int, done bool) {
 	return work, false
 }
 
-// locals are the local indices of the nodes of the cluster under way: its own on level 1, read
-// off its children's above
-func (h *Hierarchy[T]) locals() []int32 {
-	if h.job.j == 0 {
-		return h.levels[0].clusters[h.job.c].local
-	}
-	return h.b.locals
+// under is class k's view of the cluster the job has under way
+func (h *Hierarchy[T]) under(k int) *cluster[T] {
+	return &h.views[k].levels[h.job.j].clusters[h.job.c]
 }
 
-// prepareJob keeps the cluster of the job as it is, then readies it to be filled: on level 1
-// read off the graph, its entrances chosen; above read off the level below, its entrances chosen
-// again unless its children's costs alone changed
+// nodesLeft moves the job on to the first class from its own whose view of the cluster has
+// nodes; false where none has
+func (h *Hierarchy[T]) nodesLeft() bool {
+	jb := &h.job
+	for ; jb.k < len(h.views); jb.k++ {
+		if len(h.under(jb.k).keys) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// locals are the local indices of class k's nodes of the cluster under way: its own on level 1,
+// read off its children's above
+func (h *Hierarchy[T]) locals(k int) []int32 {
+	if h.job.j == 0 {
+		return h.under(k).local
+	}
+	return h.b.locals[k]
+}
+
+// fillGraph is the graph class k's nodes of the cluster under way are filled over: of one class
+// the graph read, of several the class's own
+func (h *Hierarchy[T]) fillGraph(k int) *localGraph {
+	if len(h.views) == 1 {
+		return &h.b.graph
+	}
+	return &h.b.graphs[k]
+}
+
+// prepareJob keeps the cluster of the job as every class sees it, then readies it to be filled:
+// on level 1 read off the graph once, the entrances of each class chosen; above read off the
+// level below as each class sees it, its entrances chosen again unless its children's costs
+// alone changed
 func (h *Hierarchy[T]) prepareJob() int {
 	jb := &h.job
-	cl := &h.levels[jb.j].clusters[jb.c]
-	jb.keys = append(jb.keys[:0], cl.keys...)
-	jb.class = append(jb.class[:0], cl.class...)
-	jb.twinAt = append(jb.twinAt[:0], cl.twinAt...)
-	jb.twins = append(jb.twins[:0], cl.twins...)
-	jb.intra = append(jb.intra[:0], cl.intra...)
 	jb.across = jb.across[:0]
-	for _, tw := range cl.twins {
-		jb.across = append(jb.across, tw.other)
+	work := 1
+	for k := range h.views {
+		cl, w := h.under(k), &jb.was[k]
+		w.keys = append(w.keys[:0], cl.keys...)
+		w.class = append(w.class[:0], cl.class...)
+		w.twinAt = append(w.twinAt[:0], cl.twinAt...)
+		w.twins = append(w.twins[:0], cl.twins...)
+		w.intra = append(w.intra[:0], cl.intra...)
+		for _, tw := range cl.twins {
+			jb.across = append(jb.across, tw.other)
+		}
+		work += len(w.intra) / workChecks
 	}
-	work := 1 + len(jb.intra)/workChecks
 	switch {
 	case jb.j == 0:
 		work += h.prepare1(jb.c)
 	case jb.kind == refill:
-		work += h.prepareCosts(jb.j, jb.c)
+		for k := range h.views {
+			work += h.prepareCosts(k, jb.j, jb.c)
+		}
 	default:
-		work += h.prepareK(jb.j, jb.c)
+		for k := range h.views {
+			work += h.prepareK(k, jb.j, jb.c)
+		}
 	}
 	return work
 }
 
 // finish classifies the cluster of the job and marks what its change leaves stale: the cluster
-// above it whole where its nodes, their classes or their twins changed, that cluster's costs
-// where its own costs alone did; the clusters above across its borders where its nodes or their
-// classes changed, as they may choose other entrances; on level 1 the labels where its
-// connectivity changed
+// above it whole where the nodes of a class, their classes or their twins changed, that
+// cluster's costs where its own costs alone did; the clusters above across its borders where the
+// nodes of a class or their classes changed, as they may choose other entrances; on level 1 the
+// labels of a class where its connectivity changed
 func (h *Hierarchy[T]) finish() int {
 	jb := &h.job
 	j, c := jb.j, jb.c
 	lv := &h.levels[j]
-	cl := &lv.clusters[c]
-	classify(cl)
-	work := 1 + len(cl.intra)/workChecks
+	work := 1
+	for k := range h.views {
+		cl := h.under(k)
+		classify(cl)
+		work += len(cl.intra) / workChecks
+		if len(jb.was[k].keys) != len(cl.keys) {
+			h.views[k].levels[j].based = false
+		}
+	}
 	h.builds++
 	if jb.kind == refill {
 		h.refills[j]++
 	} else {
 		h.rebuilds[j]++
 	}
-	if len(jb.keys) != len(cl.keys) {
-		lv.based = false
-	}
 	if lv.stale[c] = jb.again; jb.again == fresh {
 		lv.stales--
 	}
 	if j == 0 {
-		work += h.note(c)
+		for k := range h.views {
+			work += h.note(k, c)
+		}
 	}
 	if lv.parent == nil {
 		return work
 	}
-	nodes := slices.Equal(jb.keys, cl.keys) && slices.Equal(jb.class, cl.class)
+	nodes, twins, costs := true, true, true
+	for k := range h.views {
+		cl, w := h.under(k), &jb.was[k]
+		nodes = nodes && slices.Equal(w.keys, cl.keys) && slices.Equal(w.class, cl.class)
+		twins = twins && slices.Equal(w.twinAt, cl.twinAt) && slices.Equal(w.twins, cl.twins)
+		costs = costs && slices.Equal(w.intra, cl.intra)
+	}
 	switch {
-	case !nodes || !slices.Equal(jb.twinAt, cl.twinAt) || !slices.Equal(jb.twins, cl.twins):
+	case !nodes || !twins:
 		h.mark(j+1, lv.parent[c], rebuild)
-	case !slices.Equal(jb.intra, cl.intra):
+	case !costs:
 		h.mark(j+1, lv.parent[c], refill)
 	}
 	if nodes {
 		return work
 	}
-	for _, tw := range cl.twins {
-		jb.across = append(jb.across, tw.other)
+	for k := range h.views {
+		for _, tw := range h.under(k).twins {
+			jb.across = append(jb.across, tw.other)
+		}
 	}
 	for _, o := range jb.across {
 		if p := lv.parent[o]; p != lv.parent[c] {

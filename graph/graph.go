@@ -5,6 +5,9 @@ package graph
 type Transition[T comparable] struct {
 	To   T
 	Cost float64
+	// Refuses has bit k set where class k cannot take the step, 0 where every class can; a graph
+	// of one class never reads it.
+	Refuses uint8
 }
 
 // Transitions appends to buffer every step from from, prev being the state from was reached from
@@ -31,6 +34,9 @@ type Implicit[T comparable] struct {
 	// Layout lays the states out in a plane; with one, a path between ends far apart is found by
 	// HPA* over a hierarchy of clusters, nil keeping every path the cheapest, found by A*.
 	Layout *Layout[T]
+	// Classes is how many classes the graph serves, up to 8, each taking the steps whose Refuses
+	// leaves its bit clear, the bits from Classes up unread; 0 and 1 are one class.
+	Classes int
 }
 
 // Layout is how a graph's states lie in a plane of Width × Height integer coordinates, for HPA*;
@@ -43,6 +49,6 @@ type Layout[T comparable] struct {
 	At            func(x, y int, buf []T) []T
 	Width, Height int
 	// Backward is Forward seen from where its steps end: the states a step leads from into to,
-	// each at that step's cost.
+	// each at that step's cost and refused to the classes it refuses.
 	Backward Transitions[T]
 }

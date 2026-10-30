@@ -242,3 +242,48 @@ func ExampleSolver_Search() {
 	// through the door: [32 36 28 28]
 	// round the wall: [72 52 44 28]
 }
+
+func ExampleSearch_Class() {
+	// a wall down the middle, open at the bottom and at a door, which class 1 cannot step into
+	const width, height = 7, 5
+	door := point{X: 3, Y: 2}
+	open := func(p point) bool {
+		inside := p.X >= 0 && p.Y >= 0 && p.X < width && p.Y < height
+		return inside && (p.X != 3 || p.Y == height-1 || p == door)
+	}
+	dirs := [4]point{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
+	steps := func(from, _ point, buf []graph.Transition[point]) []graph.Transition[point] {
+		for _, d := range dirs {
+			to := point{X: from.X + d.X, Y: from.Y + d.Y}
+			if !open(to) {
+				continue
+			}
+			step := graph.Transition[point]{To: to, Cost: 1}
+			if to == door {
+				step.Refuses = 1 << 1
+			}
+			buf = append(buf, step)
+		}
+		return buf
+	}
+	solver := hpastar.NewSolver(graph.Implicit[point]{
+		Forward: steps,
+		Heuristic: func(a, b point) float64 {
+			return math.Abs(float64(a.X-b.X)) + math.Abs(float64(a.Y-b.Y))
+		},
+		Index:   func(p point) int { return p.Y*width + p.X },
+		Size:    width * height,
+		Classes: 2,
+	})
+
+	search := solver.Search()
+	path := make([]point, width*height)
+	for class := range 2 {
+		search.Class(class)
+		n, found := search.Path(point{X: 0, Y: 2}, point{X: 6, Y: 2}, path)
+		fmt.Println(class, found, path[:n])
+	}
+	// Output:
+	// 0 true [{0 2} {1 2} {2 2} {3 2} {4 2} {5 2} {6 2}]
+	// 1 true [{0 2} {1 2} {2 2} {2 3} {2 4} {3 4} {4 4} {5 4} {6 4} {6 3} {6 2}]
+}

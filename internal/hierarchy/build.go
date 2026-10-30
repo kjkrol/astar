@@ -36,7 +36,15 @@ type builder[T comparable] struct {
 	runs, cursor   []int32
 	order          []int32
 	pairs          []pair[T]
-	locals         []int32
+	// by class: above, the local indices of its nodes of the cluster built; of several classes,
+	// the graph it fills them over
+	locals [][]int32
+	graphs []localGraph
+	// of several classes, listed once a job: the classes refusing each step of the arena, and by
+	// a state's key where its steps lie there
+	masks  []uint8
+	listed members
+	lists  [][2]int32
 	// the transitions read off the graph since the job's step began
 	read int
 }
@@ -44,11 +52,12 @@ type builder[T comparable] struct {
 // a step of level 1 across the border of the cluster built, from or into its state of local
 // index local
 type crossing[T comparable] struct {
-	local int32
-	other T
-	key   int
-	c     int32 // other's cluster
-	cost  float64
+	local   int32
+	other   T
+	key     int
+	c       int32 // other's cluster
+	refuses uint8
+	cost    float64
 }
 
 // a twin of a child of the cluster built leading out of it, from the child's node u to v
@@ -136,6 +145,23 @@ type localGraph struct {
 	start []int32 // by local index and one more: where its steps start
 	to    []int32
 	cost  []float64
+	mask  []uint8 // a build's of several classes: the classes refusing each step
+}
+
+// keep copies into dst the steps of g class bit takes
+func keep(dst, g *localGraph, bit uint8) {
+	n := len(g.start) - 1
+	dst.start = grown(dst.start, n+1)
+	dst.to, dst.cost = dst.to[:0], dst.cost[:0]
+	for l := range n {
+		dst.start[l] = int32(len(dst.to))
+		for e := g.start[l]; e < g.start[l+1]; e++ {
+			if g.mask[e]&bit == 0 {
+				dst.to, dst.cost = append(dst.to, g.to[e]), append(dst.cost, g.cost[e])
+			}
+		}
+	}
+	dst.start[n] = int32(len(dst.to))
 }
 
 // localFill settles a localGraph outward from one local index in order of cost, by Dijkstra
@@ -247,14 +273,13 @@ func grown[E any](s []E, n int) []E {
 	return s[:n]
 }
 
-// prepare1 readies cluster c of level 1 to be filled: its graph read, its entrances chosen on
-// every border; it reports the work done
+// prepare1 readies cluster c of level 1 to be filled: its graph read once, the entrances of each
+// class chosen on every border, each class's trees kept while its own fit the budget; it reports
+// the work done
 func (h *Hierarchy[T]) prepare1(c int32) int {
 	b := &h.b
-	cl := &h.levels[0].clusters[c]
 	x0, y0, _, _ := h.block1(c)
 	work := h.scan(&b.reader, c)
-	cl.layers = int32(b.layers)
 	b.read = h.read1(&b.reader, c, h.graph.Forward, b)
 	b.others = b.others[:0]
 	for i := range b.outs {
@@ -265,28 +290,43 @@ func (h *Hierarchy[T]) prepare1(c int32) int {
 	}
 	slices.Sort(b.others)
 	b.others = slices.Compact(b.others)
-	b.pairs = b.pairs[:0]
-	for _, o := range b.others {
-		h.candidatesOut1(o, x0, y0)
-		h.pick(0)
-		h.candidatesIn1(o)
-		h.pick(0)
+	if h.all != 0 {
+		b.arena, b.masks, b.lists = b.arena[:0], b.masks[:0], b.lists[:0]
+		b.listed.reset(2 * (len(b.outs) + len(b.ins)))
 	}
-	h.assemble(cl, 0)
-	span := int(cl.layers) * h.config.Side * h.config.Side
+	span := b.layers * h.config.Side * h.config.Side
 	width := 1
 	if span > 1<<8 {
 		width = 2
 	}
-	h.trees -= cl.bytes
-	cl.bytes = 0
-	keep := 0
-	if need := len(cl.keys) * span * width; span <= 1<<16 && h.trees+need <= h.config.Trees {
-		cl.bytes, keep = need, span
-		h.trees += need
+	for k := range h.views {
+		cl := &h.views[k].levels[0].clusters[c]
+		cl.layers = int32(b.layers)
+		bit := h.bit(k)
+		b.pairs = b.pairs[:0]
+		for _, o := range b.others {
+			h.candidatesOut1(o, x0, y0, bit)
+			h.pick(0, bit)
+			h.candidatesIn1(o, bit)
+			h.pick(0, bit)
+		}
+		h.assemble(cl, 0)
+		work += len(b.pairs)
+		h.trees[k] -= cl.bytes
+		cl.bytes = 0
+		kept := 0
+		if need := len(cl.keys) * span * width; span <= 1<<16 &&
+			h.trees[k]+need <= h.config.Trees {
+			cl.bytes, kept = need, span
+			h.trees[k] += need
+		}
+		fillSetup(cl, kept)
+		if h.all != 0 {
+			keep(&b.graphs[k], &b.graph, bit)
+			work += len(b.graph.to) / workChecks
+		}
 	}
-	fillSetup(cl, keep)
-	return work + workRead*b.read + len(b.pairs)
+	return work + workRead*b.read
 }
 
 // scan lists the states of cluster c of level 1 into r by their local index, and keeps their
@@ -332,7 +372,8 @@ func (h *Hierarchy[T]) read1(r *reader[T], c int32, forward graph.Transitions[T]
 	places := h.config.Side * h.config.Side
 	span := r.layers * places
 	g.start = grown(g.start, span+1)
-	g.to, g.cost = g.to[:0], g.cost[:0]
+	g.to, g.cost, g.mask = g.to[:0], g.cost[:0], g.mask[:0]
+	masked := b != nil && h.all != 0
 	if b != nil {
 		b.outs, b.ins = b.outs[:0], b.ins[:0]
 	}
@@ -348,6 +389,9 @@ func (h *Hierarchy[T]) read1(r *reader[T], c int32, forward graph.Transitions[T]
 			key := h.graph.Index(st.To)
 			if to, in := r.members.get(key); in {
 				g.to, g.cost = append(g.to, to), append(g.cost, st.Cost)
+				if masked {
+					g.mask = append(g.mask, st.Refuses&h.all)
+				}
 			} else if b != nil {
 				b.outs = h.leaving(c, int32(l), st, key, b.outs)
 			}
@@ -378,19 +422,19 @@ func (h *Hierarchy[T]) leaving(c, local int32, st graph.Transition[T], key int,
 	list []crossing[T]) []crossing[T] {
 	if o, ok := h.cluster1(st.To); ok && o != c {
 		list = append(list, crossing[T]{local: local, other: st.To, key: key, c: o,
-			cost: st.Cost})
+			refuses: st.Refuses & h.all, cost: st.Cost})
 	}
 	return list
 }
 
 // crossingCost is what the step listed for the state of local index local and the state of key
-// costs, +Inf where none is listed
-func crossingCost[T comparable](list []crossing[T], local int32, key int) float64 {
+// costs class bit, +Inf where it is listed for none
+func crossingCost[T comparable](list []crossing[T], local int32, key int, bit uint8) float64 {
 	i, _ := slices.BinarySearchFunc(list, local, func(x crossing[T], l int32) int {
 		return cmp.Compare(x.local, l)
 	})
 	for ; i < len(list) && list[i].local == local; i++ {
-		if list[i].key == key {
+		if list[i].key == key && list[i].refuses&bit == 0 {
 			return list[i].cost
 		}
 	}
@@ -398,19 +442,22 @@ func crossingCost[T comparable](list []crossing[T], local int32, key int) float6
 }
 
 // candidatesOut1 lists the cluster's border states stepping into cluster o, each with its best
-// step there
-func (h *Hierarchy[T]) candidatesOut1(o int32, x0, y0 int) {
+// step there, of the steps class bit takes
+func (h *Hierarchy[T]) candidatesOut1(o int32, x0, y0 int, bit uint8) {
 	b, side := &h.b, h.config.Side
-	b.cands, b.arena = b.cands[:0], b.arena[:0]
+	b.cands = b.cands[:0]
+	if bit == 0 {
+		b.arena = b.arena[:0]
+	}
 	for i := 0; i < len(b.outs); {
 		local := b.outs[i].local
 		best, bestKey, bestRev := -1, 0.0, 0.0
 		for ; i < len(b.outs) && b.outs[i].local == local; i++ {
 			x := &b.outs[i]
-			if x.c != o {
+			if x.c != o || x.refuses&bit != 0 {
 				continue
 			}
-			rev := crossingCost(b.ins, local, x.key)
+			rev := crossingCost(b.ins, local, x.key, bit)
 			key := crossingKey(x.cost, rev)
 			if best < 0 || key < bestKey || key == bestKey && x.key < b.outs[best].key {
 				best, bestKey, bestRev = i, key, rev
@@ -423,7 +470,11 @@ func (h *Hierarchy[T]) candidatesOut1(o int32, x0, y0 int) {
 		s, p := b.at[local], int(local)%(side*side)
 		cd := candidate[T]{fromKey: h.graph.Index(s), toKey: x.key, x: x0 + p%side,
 			y: y0 + p/side, key: bestKey}
-		cd.fromSteps, cd.toSteps = h.stepsOf(s), h.stepsOf(x.other)
+		if bit == 0 {
+			cd.fromSteps, cd.toSteps = h.stepsOf(s), h.stepsOf(x.other)
+		} else {
+			cd.fromSteps, cd.toSteps = h.listed(s, cd.fromKey), h.listed(x.other, x.key)
+		}
 		cd.twin = pair[T]{node: s, key: cd.fromKey, local: local, other: o, otherKey: x.key,
 			out: float32(x.cost), in: float32(bestRev)}
 		b.cands = append(b.cands, cd)
@@ -431,13 +482,16 @@ func (h *Hierarchy[T]) candidatesOut1(o int32, x0, y0 int) {
 }
 
 // candidatesIn1 lists the border states of cluster o stepping into the cluster, each with its
-// best step here
-func (h *Hierarchy[T]) candidatesIn1(o int32) {
+// best step here, of the steps class bit takes
+func (h *Hierarchy[T]) candidatesIn1(o int32, bit uint8) {
 	b := &h.b
-	b.cands, b.arena = b.cands[:0], b.arena[:0]
+	b.cands = b.cands[:0]
+	if bit == 0 {
+		b.arena = b.arena[:0]
+	}
 	b.group = b.group[:0]
 	for _, x := range b.ins {
-		if x.c == o {
+		if x.c == o && x.refuses&bit == 0 {
 			b.group = append(b.group, x)
 		}
 	}
@@ -449,7 +503,7 @@ func (h *Hierarchy[T]) candidatesIn1(o int32) {
 		best, bestKey, bestRev, bestTo := -1, 0.0, 0.0, 0
 		for ; i < len(b.group) && b.group[i].key == from; i++ {
 			x := &b.group[i]
-			rev := crossingCost(b.outs, x.local, from)
+			rev := crossingCost(b.outs, x.local, from, bit)
 			key, to := crossingKey(x.cost, rev), h.graph.Index(b.at[x.local])
 			if best < 0 || key < bestKey || key == bestKey && to < bestTo {
 				best, bestKey, bestRev, bestTo = i, key, rev, to
@@ -459,7 +513,11 @@ func (h *Hierarchy[T]) candidatesIn1(o int32) {
 		fx, fy, _ := h.layout.Coords(x.other)
 		to := b.at[x.local]
 		cd := candidate[T]{fromKey: from, toKey: bestTo, x: fx, y: fy, key: bestKey}
-		cd.fromSteps, cd.toSteps = h.stepsOf(x.other), h.stepsOf(to)
+		if bit == 0 {
+			cd.fromSteps, cd.toSteps = h.stepsOf(x.other), h.stepsOf(to)
+		} else {
+			cd.fromSteps, cd.toSteps = h.listed(x.other, from), h.listed(to, bestTo)
+		}
 		cd.twin = pair[T]{node: to, key: bestTo, local: x.local, other: o, otherKey: from,
 			out: float32(bestRev), in: float32(x.cost)}
 		b.cands = append(b.cands, cd)
@@ -478,14 +536,51 @@ func (h *Hierarchy[T]) stepsOf(s T) [2]int32 {
 	return [2]int32{lo, int32(len(b.arena))}
 }
 
-func (b *builder[T]) stepsTo(steps [2]int32, key int) bool {
-	return slices.Contains(b.arena[steps[0]:steps[1]], key)
+// listed is where the keys of the states s, of key, steps to lie in the arena, the classes
+// refusing each step beside them, put there once a job: the steps within the cluster built off
+// its graph for a state of it, every step read off the graph for a state across its border
+func (h *Hierarchy[T]) listed(s T, key int) [2]int32 {
+	b := &h.b
+	if i, ok := b.listed.get(key); ok {
+		return b.lists[i]
+	}
+	lo := int32(len(b.arena))
+	if l, in := b.members.get(key); in {
+		g := &b.graph
+		for e := g.start[l]; e < g.start[l+1]; e++ {
+			b.arena = append(b.arena, h.graph.Index(b.at[g.to[e]]))
+			b.masks = append(b.masks, g.mask[e])
+		}
+	} else {
+		b.steps = h.graph.Forward(s, s, b.steps[:0])
+		b.read += len(b.steps)
+		for _, st := range b.steps {
+			b.arena = append(b.arena, h.graph.Index(st.To))
+			b.masks = append(b.masks, st.Refuses&h.all)
+		}
+	}
+	b.listed.put(key, int32(len(b.lists)))
+	b.lists = append(b.lists, [2]int32{lo, int32(len(b.arena))})
+	return b.lists[len(b.lists)-1]
+}
+
+// stepsTo says whether the steps in the arena step to the state of key, of those class bit takes
+func (b *builder[T]) stepsTo(steps [2]int32, key int, bit uint8) bool {
+	if bit == 0 {
+		return slices.Contains(b.arena[steps[0]:steps[1]], key)
+	}
+	for i := steps[0]; i < steps[1]; i++ {
+		if b.arena[i] == key && b.masks[i]&bit == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // joined says whether candidates a and c, a before c along the border, lie on one run: on level
-// 1 neighbours stepping to each other on both sides of the border, above in one class of one
-// cluster a level down on both sides
-func (b *builder[T]) joined(first bool, a, c *candidate[T]) bool {
+// 1 neighbours stepping to each other on both sides of the border by the steps class bit takes,
+// above in one class of one cluster a level down on both sides
+func (b *builder[T]) joined(first bool, a, c *candidate[T], bit uint8) bool {
 	if !first {
 		return a.fromC == c.fromC && a.fromClass == c.fromClass && a.toC == c.toC &&
 			a.toClass == c.toClass
@@ -493,14 +588,16 @@ func (b *builder[T]) joined(first bool, a, c *candidate[T]) bool {
 	if a.across-c.across > 1 || c.across-a.across > 1 {
 		return false
 	}
-	return b.stepsTo(a.fromSteps, c.fromKey) && b.stepsTo(c.fromSteps, a.fromKey) &&
-		(a.toKey == c.toKey || b.stepsTo(a.toSteps, c.toKey) && b.stepsTo(c.toSteps, a.toKey))
+	return b.stepsTo(a.fromSteps, c.fromKey, bit) && b.stepsTo(c.fromSteps, a.fromKey, bit) &&
+		(a.toKey == c.toKey ||
+			b.stepsTo(a.toSteps, c.toKey, bit) && b.stepsTo(c.toSteps, a.toKey, bit))
 }
 
 // pick keeps of the candidates of one border of a cluster of level j, crossing it one way, each
 // run's ends, its local minima and its cheapest crossing of every span coordinates along it,
-// the span doubled a level, as the twins they make
-func (h *Hierarchy[T]) pick(j int) {
+// the span doubled a level, as the twins they make; on level 1 its runs join by the steps class
+// bit takes
+func (h *Hierarchy[T]) pick(j int, bit uint8) {
 	b := &h.b
 	cs := b.cands
 	n := len(cs)
@@ -532,7 +629,7 @@ func (h *Hierarchy[T]) pick(j int) {
 			if first && cs[k].along-cs[i].along > 1 || !first && k > i+1 {
 				break
 			}
-			if b.joined(first, &cs[i], &cs[k]) {
+			if b.joined(first, &cs[i], &cs[k], bit) {
 				joinRoots(b.root, int32(i), int32(k))
 			}
 		}
@@ -653,11 +750,10 @@ func fillSetup[T comparable](cl *cluster[T], span int) {
 	}
 }
 
-// fillRow fills the graph read from the cluster's node i, of local index locals[i], to the
-// others of locals: their costs, and its tree where the cluster keeps trees; it reports the work
-// done
-func (h *Hierarchy[T]) fillRow(cl *cluster[T], locals []int32, i int) int {
-	f, g, n, span := &h.b.fill, &h.b.graph, len(locals), int(cl.span)
+// fillRow fills g from the cluster's node i, of local index locals[i], to the others of locals:
+// their costs, and its tree where the cluster keeps trees; it reports the work done
+func (h *Hierarchy[T]) fillRow(cl *cluster[T], g *localGraph, locals []int32, i int) int {
+	f, n, span := &h.b.fill, len(locals), int(cl.span)
 	f.run(g, locals[i], locals)
 	row := cl.intra[i*n : (i+1)*n]
 	for k, t := range locals {
@@ -733,13 +829,13 @@ func classify[T comparable](cl *cluster[T]) {
 	}
 }
 
-// prepareK readies cluster c of level j above 1 to be filled over the graph of the level below:
-// its entrances chosen of the twins of its children leading out, that graph read; it reports the
-// work done
-func (h *Hierarchy[T]) prepareK(j int, c int32) int {
-	b := &h.b
+// prepareK readies class k's view of cluster c of level j above 1 to be filled over the graph of
+// the level below as the class sees it: its entrances chosen of the twins of its children
+// leading out, that graph read; it reports the work done
+func (h *Hierarchy[T]) prepareK(k, j int, c int32) int {
+	b, v := &h.b, &h.views[k]
 	lv, dn := &h.levels[j], &h.levels[j-1]
-	cl := &lv.clusters[c]
+	cl, down := &v.levels[j].clusters[c], v.levels[j-1].clusters
 	f := int32(h.config.Factor)
 	cx, cy := c%lv.cols, c/lv.cols
 	cl.offset = grown(cl.offset, int(f*f)+1)
@@ -752,16 +848,16 @@ func (h *Hierarchy[T]) prepareK(j int, c int32) int {
 			continue
 		}
 		ch := ccy*dn.cols + ccx
-		chl := &dn.clusters[ch]
+		chl := &down[ch]
 		cl.offset[s+1] += int32(len(chl.keys))
 		for u := range chl.keys {
 			for _, tw := range chl.twins[chl.twinAt[u]:chl.twinAt[u+1]] {
 				if dn.parent[tw.other] == c {
 					continue
 				}
-				if v, ok := h.nodeIndex(j-1, tw.other, tw.key); ok {
+				if i, ok := v.nodeIndex(j-1, tw.other, tw.key); ok {
 					b.crossK = append(b.crossK, crossingK{u: nodeRef{ch, int32(u)},
-						v: nodeRef{tw.other, v}, uKey: chl.keys[u], vKey: tw.key,
+						v: nodeRef{tw.other, i}, uKey: chl.keys[u], vKey: tw.key,
 						up: dn.parent[tw.other], out: tw.out, in: tw.in})
 				}
 			}
@@ -775,34 +871,34 @@ func (h *Hierarchy[T]) prepareK(j int, c int32) int {
 	b.others = slices.Compact(b.others)
 	b.pairs = b.pairs[:0]
 	for _, o := range b.others {
-		h.candidatesOutK(j, o)
-		h.pick(j)
-		h.candidatesInK(j, o)
-		h.pick(j)
+		h.candidatesOutK(v, j, o)
+		h.pick(j, 0)
+		h.candidatesInK(v, j, o)
+		h.pick(j, 0)
 	}
 	h.assemble(cl, j)
-	return len(b.crossK) + len(b.pairs) + h.prepareCosts(j, c)
+	return len(b.crossK) + len(b.pairs) + h.prepareCosts(k, j, c)
 }
 
-// prepareCosts readies cluster c of level j above 1, its entrances kept, to be filled over the
-// graph of the level below, read; it reports the work done
-func (h *Hierarchy[T]) prepareCosts(j int, c int32) int {
-	b, dn := &h.b, &h.levels[j-1]
-	cl := &h.levels[j].clusters[c]
-	h.readK(&b.graph, j, c, false)
-	b.locals = grown(b.locals, len(cl.down))
+// prepareCosts readies class k's view of cluster c of level j above 1, its entrances kept, to be
+// filled over the graph of the level below as the class sees it, read; it reports the work done
+func (h *Hierarchy[T]) prepareCosts(k, j int, c int32) int {
+	b, v, dn := &h.b, &h.views[k], &h.levels[j-1]
+	cl, g := &v.levels[j].clusters[c], h.fillGraph(k)
+	h.readK(v, g, j, c, false)
+	b.locals[k] = grown(b.locals[k], len(cl.down))
 	for i, r := range cl.down {
-		b.locals[i] = cl.offset[dn.slot[r.c]] + r.i
+		b.locals[k][i] = cl.offset[dn.slot[r.c]] + r.i
 	}
 	fillSetup(cl, int(cl.offset[h.config.Factor*h.config.Factor]))
-	return 1 + len(b.graph.to) + len(cl.down)
+	return 1 + len(g.to) + len(cl.down)
 }
 
-// readK reads the graph of the level below within cluster c of level j into g, by local index:
+// readK reads the graph of v's level below within cluster c of level j into g, by local index:
 // each node's steps out of it, or with back each node's steps into it
-func (h *Hierarchy[T]) readK(g *localGraph, j int, c int32, back bool) {
+func (h *Hierarchy[T]) readK(v *view[T], g *localGraph, j int, c int32, back bool) {
 	lv, dn := &h.levels[j], &h.levels[j-1]
-	cl := &lv.clusters[c]
+	cl, down := &v.levels[j].clusters[c], v.levels[j-1].clusters
 	f := int32(h.config.Factor)
 	cx, cy := c%lv.cols, c/lv.cols
 	span := cl.offset[f*f]
@@ -813,7 +909,7 @@ func (h *Hierarchy[T]) readK(g *localGraph, j int, c int32, back bool) {
 		if ccx >= dn.cols || ccy >= dn.rows {
 			continue
 		}
-		chl := &dn.clusters[ccy*dn.cols+ccx]
+		chl := &down[ccy*dn.cols+ccx]
 		n, base := int32(len(chl.keys)), cl.offset[s]
 		kept := chl.out
 		if back {
@@ -839,8 +935,8 @@ func (h *Hierarchy[T]) readK(g *localGraph, j int, c int32, back bool) {
 				if cost == inf32 || dn.parent[tw.other] != c {
 					continue
 				}
-				if v, ok := h.nodeIndex(j-1, tw.other, tw.key); ok {
-					g.to = append(g.to, cl.offset[dn.slot[tw.other]]+v)
+				if i, ok := v.nodeIndex(j-1, tw.other, tw.key); ok {
+					g.to = append(g.to, cl.offset[dn.slot[tw.other]]+i)
 					g.cost = append(g.cost, float64(cost))
 				}
 			}
@@ -849,10 +945,10 @@ func (h *Hierarchy[T]) readK(g *localGraph, j int, c int32, back bool) {
 	g.start[span] = int32(len(g.to))
 }
 
-// candidatesOutK lists the nodes of the children stepping into cluster o of level j, each with
+// candidatesOutK lists the nodes of v's children stepping into cluster o of level j, each with
 // its best step there
-func (h *Hierarchy[T]) candidatesOutK(j int, o int32) {
-	b, dn := &h.b, &h.levels[j-1]
+func (h *Hierarchy[T]) candidatesOutK(v *view[T], j int, o int32) {
+	b, down := &h.b, v.levels[j-1].clusters
 	b.cands = b.cands[:0]
 	for i := 0; i < len(b.crossK); {
 		u := b.crossK[i].u
@@ -869,15 +965,15 @@ func (h *Hierarchy[T]) candidatesOutK(j int, o int32) {
 		}
 		if best >= 0 {
 			x := &b.crossK[best]
-			b.cands = append(b.cands, h.candidateK(dn, x.u, x.v, bestKey, x.u, o, x.out, x.in))
+			b.cands = append(b.cands, h.candidateK(down, x.u, x.v, bestKey, x.u, o, x.out, x.in))
 		}
 	}
 }
 
-// candidatesInK lists the nodes of cluster o of level j stepping into the children, each with
+// candidatesInK lists v's nodes of cluster o of level j stepping into the children, each with
 // its best step here
-func (h *Hierarchy[T]) candidatesInK(j int, o int32) {
-	b, dn := &h.b, &h.levels[j-1]
+func (h *Hierarchy[T]) candidatesInK(v *view[T], j int, o int32) {
+	b, down := &h.b, v.levels[j-1].clusters
 	b.cands = b.cands[:0]
 	b.groupK = b.groupK[:0]
 	for _, x := range b.crossK {
@@ -898,19 +994,19 @@ func (h *Hierarchy[T]) candidatesInK(j int, o int32) {
 			}
 		}
 		x := &b.groupK[best]
-		b.cands = append(b.cands, h.candidateK(dn, x.v, x.u, bestKey, x.u, o, x.out, x.in))
+		b.cands = append(b.cands, h.candidateK(down, x.v, x.u, bestKey, x.u, o, x.out, x.in))
 	}
 }
 
-// candidateK is the candidate of the step from from to to, the twin of node of the cluster built
-// with the node across in cluster o
-func (h *Hierarchy[T]) candidateK(dn *level[T], from, to nodeRef, key float64, node nodeRef,
-	o int32, out, in float32) candidate[T] {
-	fc, tc := &dn.clusters[from.c], &dn.clusters[to.c]
+// candidateK is the candidate of the step from from to to of the clusters down, the twin of node
+// of the cluster built with the node across in cluster o
+func (h *Hierarchy[T]) candidateK(down []cluster[T], from, to nodeRef, key float64,
+	node nodeRef, o int32, out, in float32) candidate[T] {
+	fc, tc := &down[from.c], &down[to.c]
 	x, y, _ := h.layout.Coords(fc.states[from.i])
 	cd := candidate[T]{fromKey: fc.keys[from.i], toKey: tc.keys[to.i], x: x, y: y, key: key,
 		fromC: from.c, toC: to.c, fromClass: fc.class[from.i], toClass: tc.class[to.i]}
-	nc, across := &dn.clusters[node.c], cd.toKey
+	nc, across := &down[node.c], cd.toKey
 	if node != from {
 		across = cd.fromKey
 	}
