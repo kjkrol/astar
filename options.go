@@ -6,7 +6,7 @@ import "github.com/kjkrol/hpastar/internal/hierarchy"
 type Option func(*config)
 
 // what NewSolver's options set: the side of the hierarchy's first-level clusters, how far apart a
-// path's ends lie for it to climb and the memory of its trees
+// path's ends lie for it to climb and the memory of each class's trees
 type config struct {
 	side, trees int
 	near        float64
@@ -45,6 +45,6 @@ func WithNear(distance float64) Option {
 	return func(c *config) { c.near, c.nearSet = distance, true }
 }
 
-// WithTreeMemory sets the memory the first level's trees may take, in bytes, 64 MB by default;
-// past it a leg is searched within its cluster instead of walked, to the same states.
+// WithTreeMemory sets the memory the first level's trees of each class may take, in bytes, 64 MB
+// by default; past it a leg is searched within its cluster instead of walked, to the same states.
 func WithTreeMemory(bytes int) Option { return func(c *config) { c.trees = bytes } }

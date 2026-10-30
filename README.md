@@ -64,7 +64,8 @@ package `graph` states:
    end — has no state expanded twice; an inconsistent one may reopen a closed state, which the
    search does, keeping the path the cheapest.
 4. A step that cannot be taken is a `Transition` not generated: there is no cost that means
-   "never".
+   "never". A step only some classes cannot take is generated with their bits in its `Refuses`
+   (see [Classes](#classes)).
 
 ## Getting started
 
@@ -224,6 +225,36 @@ build takes 3 s; a cell changed amid the map is followed in 16 ms (its first-lev
 0.64 ms, the clusters above it the rest, the labels kept), one on the borders of every level in
 65 ms; on 4096x4096 either in 17 ms, the fourth level left as it is (`BENCHMARKS.md` has every
 level's share).
+
+## Classes
+
+One graph may serve several classes of search at once, up to 8, each taking steps of its own: a
+step some classes cannot take carries their bits in its `Refuses`, and a `Search` asks for one
+class at a time.
+
+```go
+// a step class 1 cannot take
+buf = append(buf, graph.Transition[point]{To: to, Cost: 1, Refuses: 1 << 1})
+
+solver := hpastar.NewSolver(graph.Implicit[point]{Forward: steps, Heuristic: h, Classes: 2})
+search := solver.Search()
+search.Class(1) // the next paths and reaches are class 1's
+```
+
+A class is answered exactly: its paths, its reaches and the states expanded are those a
+`Solver` over the steps it takes alone would give, with a `Layout` or without, climbed or not.
+The hierarchy keeps a whole view of each class — its entrances, the costs and trees between
+them, its labels of connected entrances — read off the graph once a cluster, so its memory and
+its rebuilds grow with the classes, the reading of the graph does not, and `WithTreeMemory`
+bounds each class's trees on its own. Changing a `Search`'s class allocates nothing.
+
+A change to the classes a step refuses is a change of the steps: `Changed` the states it
+touches. `Backward` mirrors `Refuses` as it mirrors the cost, and the transitions of `SearchVia`
+may leave out the steps their `Search`'s class refuses. The labels join steps taken either way,
+so where a class may leave a state it cannot enter, `Reaches` may say true where no path is; a
+graph refuses such a class the steps out of the state too where that matters. A graph of one
+class (`Classes` 0 or 1) reads no `Refuses`, and builds, finds and counts as before, to the
+byte. `ExampleSearch_Class` has a door one class cannot pass, and its way round.
 
 ## Performance
 

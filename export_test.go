@@ -28,3 +28,9 @@ func Worked[T comparable](s *Solver[T]) (update, step int) { return s.h.Worked()
 
 // GraphsDiffer says where the hierarchies of a and b differ, "" where they do not.
 func GraphsDiffer[T comparable](a, b *Solver[T]) string { return a.h.Diff(b.h) }
+
+// ClassDiffers says where the hierarchy of a as its class k sees it differs from b's, of one
+// class, "" where it does not.
+func ClassDiffers[T comparable](a *Solver[T], k int, b *Solver[T]) string {
+	return a.h.DiffView(k, b.h, 0)
+}

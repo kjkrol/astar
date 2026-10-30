@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v1.4.0]
+
+### Added
+
+- Classes: one `Solver` serves up to 8 classes of search, each exactly as a `Solver` over the
+  steps it takes alone would, to the path, the reach and the states expanded. A graph's
+  `Classes` says how many (0 and 1 one class), a `Transition`'s `Refuses` has the bit of every
+  class that cannot take the step (the bits from `Classes` up unread), `Backward` mirrors it, and
+  `Search.Class(k)` asks the next `Path` and `Reaches` for class k, 0 at first, allocating
+  nothing; `SearchVia`'s transitions may leave out the steps the `Search`'s class refuses. With a
+  `Layout` the hierarchy keeps a whole view of each class (its entrances, the costs and trees
+  between them, its labels), the graph read once a cluster, and `WithTreeMemory` bounds each
+  class's trees on its own; a change to the classes a step refuses is a change of steps for
+  `Changed`; the budget counts a fill of a class's node as a step. `ExampleSearch_Class`.
+- Tests: each class against a `Solver` of one class over its steps alone, its hierarchy, paths,
+  pieces, reaches and expansions, on steps refused within clusters, on crossings, across a border
+  alone, one way, a ring shut to a class, two states at a place, hex, torus, without a `Layout`,
+  without trees, on three levels, of 2, 3 and 8 classes; changes of classes and walls under
+  random budgets against a whole build, each class's labels as A* finds; a change one class alone
+  sees rebuilding what it sees; one class reading no `Refuses`, the bits past the classes unread;
+  nothing allocated; classes asked at once. Benchmarks `Update/{build,change,change-border}/
+  Classes_{2,4,8}/{none,local,scattered}` and `Path/{astar,hpa}/Classes_{2,8}/{first,last}`.
+
+### Changed
+
+- `graph.Transition` has a field more, `Refuses`, a byte: 8 bytes more a transition with its
+  padding. A graph of one class reads no `Refuses`, and builds, finds and counts as v1.3.0 did,
+  to the byte.
+
 ## [v1.3.0]
 
 The public API breaks, yet the version stays 1.x: the module has no user but its author's own.

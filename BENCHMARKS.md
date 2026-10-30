@@ -7,6 +7,47 @@ alternately with the working tree, `-benchtime=10x -cpu=1`, v1.1.3 against v1.2.
 unless said otherwise. The suite is `go test -run '^$' -bench . -benchmem` (`make bench`);
 `make bench-save` keeps five runs under `bench_results/`.
 
+## v1.4.0: classes
+
+One run a side, `-count=1 -cpu=1`, a plain build, the test binaries compiled before the first run,
+the 1-minute load under 1.0, 2026-10-30, about eight minutes in all. The maps and the far pair are
+v1.3.0's; a class's masks (`testmap`'s `Bars`) are none, a few narrows, or scattered.
+
+One class against v1.3.0, the same maps, paths and steps; the hierarchy holds the same bytes a cell
+(44.06 and 48.24), a build allocates about 450 B more, and `Transition`'s 8 B of `Refuses` lie in
+no structure the hierarchy keeps:
+
+| Rung | v1.3.0 | v1.4.0 | Δ |
+| :--- | ---: | ---: | ---: |
+| `Path/astar` 256x256 | 22.6 ms | 22.2 ms | −1.9% |
+| `Path/astar` 1024x1024 | 356 ms | 355 ms | −0.3% |
+| `Path/hpa` 256x256 | 0.582 ms | 0.587 ms | +0.9% |
+| `Path/hpa` 1024x1024 | 1.440 ms | 1.444 ms | +0.3% |
+| `Update/build` 256x256 | 167 ms | 172 ms | +3.0% |
+| `Update/build` 1024x1024 | 3.10 s | 3.18 s | +2.6% |
+| `Update/change` 1024x1024 | 17.1 ms | 17.0 ms | −0.4% |
+| `Update/change-border` 1024x1024 | 67.2 ms | 67.4 ms | +0.3% |
+
+A build of C classes, each figure against one class's (time · work steps · bytes a cell):
+
+| Classes, map | No masks | Scattered masks |
+| :--- | :---: | :---: |
+| 2, 256x256 | 1.89× · 1.70× · 2.00× | 2.23× · 2.01× · 2.41× |
+| 4, 256x256 | 3.55× · 3.22× · 3.94× | 4.22× · 3.82× · 4.74× |
+| 8, 256x256 | 6.84× · 6.25× · 7.83× | 8.19× · 7.47× · 9.44× |
+| 2, 1024x1024 | 1.89× · 1.74× · 2.00× | 2.36× · 2.26× · 2.54× |
+| 8, 1024x1024 | 6.90× · 6.45× · 7.99× | 8.92× · 8.52× · — |
+
+Without masks a Solver of C classes builds and holds about C× one class, its work 0.85–0.95× that
+of C one-class Solvers, the graph read once; masks add entrances, so a masked class costs what a
+one-class Solver over its own steps would. A change costs C× one class without masks; with
+scattered masks up to 2.3× C on 1024x1024, the third level's fills over the extra entrances
+dominating. A path costs what one class's does: the first class 3–4% more a climb and about 10%
+more an A* expansion (the filter), a masked class going round as its own graph does, 0 B a path.
+`WithTreeMemory` bounds each class's trees on its own: with one budget shared, 8 classes on
+1024x1024 searched the first-level legs instead of walking them, 6.37 ms and 9,956 states a path
+for the first class against 1.46 ms and 3,319 now.
+
 ## v1.3.0: one Solver, A* and HPA*
 
 One run a scenario, `-count=1 -cpu=1`, a plain build, the test binaries compiled before the

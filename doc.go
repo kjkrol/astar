@@ -36,11 +36,20 @@
 // while the hierarchy is not Ready are found by A*, the cheapest; ends no path joins are told
 // apart off the hierarchy's labels of connected entrances, not by searching all a start reaches.
 //
-// The graph may change while its Solver lives: a step added or taken away, the cost of a step
-// changed. Changed marks the first-level clusters a changed state's steps run through,
-// ChangedAll every one, and Update rebuilds them, and the clusters above only as far as the
-// change reaches, a budget of work at a time: the same calls make the same progress on any
+// The graph may change while its Solver lives: a step added or taken away, the cost of a step or
+// the classes it refuses changed. Changed marks the first-level clusters a changed state's steps
+// run through, ChangedAll every one, and Update rebuilds them, and the clusters above only as far
+// as the change reaches, a budget of work at a time: the same calls make the same progress on any
 // machine. Paths asked meanwhile are found by A*.
+//
+// # Classes
+//
+// A graph may serve up to 8 classes of search at once, each with steps of its own: a step some
+// classes cannot take carries their bits in its Refuses (graph.Implicit's Classes). A Search asks
+// for one class at a time (Search.Class), its paths, reaches and expansions those of a Solver over
+// the steps the class takes alone; the hierarchy keeps a view of each class, read off the graph
+// once a cluster, so its memory and its fills grow with the classes. A graph of one class reads
+// no Refuses.
 //
 // # Concurrency
 //
