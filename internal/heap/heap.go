@@ -1,26 +1,26 @@
-package astar
+package heap
 
-// openHeap is the open set: the node of the least key first, the keys kept apart from the
-// nodes so a sift reads keys alone, and each node's position kept by its id for fix. A sift
-// carries the node sifted as a hole, writing it once where it lands, and takes the way
-// container/heap's takes, so ties break as they always have.
-type openHeap struct {
+// Heap is the open set of a search, the node of the least key first, a node's key changed in
+// place by its id. Ties break as container/heap's do, so the paths found stay the same.
+type Heap struct {
+	// apart from the nodes, so that a sift reads keys alone
 	keys  []float64
 	nodes []int32
 	pos   []int32
 }
 
-// a heap for as many nodes as the solver sizes itself for, the frontier far fewer
-func newOpenHeap(nodes int) openHeap {
+// New is a heap for as many nodes as an engine sizes itself for, the frontier far fewer.
+func New(nodes int) Heap {
 	frontier := min(nodes, 4096)
-	return openHeap{
+	return Heap{
 		keys:  make([]float64, 0, frontier),
 		nodes: make([]int32, 0, frontier),
 		pos:   make([]int32, 0, nodes),
 	}
 }
 
-func (h *openHeap) push(n int32, key float64) {
+// Push adds node n at key.
+func (h *Heap) Push(n int32, key float64) {
 	for int(n) >= len(h.pos) {
 		h.pos = append(h.pos, -1)
 	}
@@ -29,7 +29,8 @@ func (h *openHeap) push(n int32, key float64) {
 	h.up(j, key, n)
 }
 
-func (h *openHeap) pop() (int32, bool) {
+// Pop takes out the node of the least key; false where the heap is empty.
+func (h *Heap) Pop() (int32, bool) {
 	last := len(h.keys) - 1
 	if last < 0 {
 		return -1, false
@@ -44,20 +45,22 @@ func (h *openHeap) pop() (int32, bool) {
 	return n, true
 }
 
-// fix moves n, in the heap, to where its new key puts it
-func (h *openHeap) fix(n int32, key float64) {
+// Fix moves n, in the heap, to where its new key puts it.
+func (h *Heap) Fix(n int32, key float64) {
 	i := int(h.pos[n])
 	if !h.down(i, len(h.keys), key, n) {
 		h.up(i, key, n)
 	}
 }
 
-func (h *openHeap) reset() {
+// Reset empties the heap, keeping its memory.
+func (h *Heap) Reset() {
 	h.keys, h.nodes = h.keys[:0], h.nodes[:0]
 }
 
-// up sifts node, of key, up from the hole at j
-func (h *openHeap) up(j int, key float64, node int32) {
+// up sifts node, of key, up from the hole at j, written once where it lands; it stops where
+// container/heap's up stops
+func (h *Heap) up(j int, key float64, node int32) {
 	for {
 		i := (j - 1) / 2
 		if i == j || !(key < h.keys[i]) {
@@ -71,8 +74,9 @@ func (h *openHeap) up(j int, key float64, node int32) {
 	h.pos[node] = int32(j)
 }
 
-// down sifts node, of key, down from the hole at i0 over the first n; true where it moved
-func (h *openHeap) down(i0, n int, key float64, node int32) bool {
+// down sifts node, of key, down from the hole at i0 over the first n, taking the right child
+// only where it is strictly less, as container/heap's down does; true where it moved
+func (h *Heap) down(i0, n int, key float64, node int32) bool {
 	i := i0
 	for {
 		j1 := 2*i + 1

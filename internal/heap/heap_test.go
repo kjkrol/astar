@@ -1,7 +1,7 @@
-package astar
+package heap
 
 import (
-	"container/heap"
+	stdheap "container/heap"
 	"math/rand/v2"
 	"testing"
 )
@@ -38,7 +38,7 @@ func (q *refQueue) Pop() any {
 func TestHeap_PopsAsContainerHeap(t *testing.T) {
 	for seed := uint64(1); seed <= 20; seed++ {
 		r := rand.New(rand.NewPCG(seed, 99))
-		h := newOpenHeap(8)
+		h := New(8)
 		ref := &refQueue{}
 		var inRef []*refNode
 		var next int32
@@ -47,18 +47,18 @@ func TestHeap_PopsAsContainerHeap(t *testing.T) {
 			case choice < 5 || len(inRef) == 0:
 				key := float64(r.Uint64() % 4)
 				n := &refNode{id: next, key: key}
-				heap.Push(ref, n)
-				h.push(next, key)
+				stdheap.Push(ref, n)
+				h.Push(next, key)
 				inRef = append(inRef, n)
 				next++
 			case choice < 7:
 				n := inRef[r.Uint64()%uint64(len(inRef))]
 				n.key = float64(r.Uint64() % 4)
-				heap.Fix(ref, n.index)
-				h.fix(n.id, n.key)
+				stdheap.Fix(ref, n.index)
+				h.Fix(n.id, n.key)
 			default:
-				want := heap.Pop(ref).(*refNode)
-				got, ok := h.pop()
+				want := stdheap.Pop(ref).(*refNode)
+				got, ok := h.Pop()
 				if !ok || got != want.id {
 					t.Fatalf("seed %d op %d: popped %d (%v), the reference %d", seed, op, got, ok,
 						want.id)
@@ -72,13 +72,13 @@ func TestHeap_PopsAsContainerHeap(t *testing.T) {
 			}
 		}
 		for ref.Len() > 0 {
-			want := heap.Pop(ref).(*refNode)
-			if got, ok := h.pop(); !ok || got != want.id {
+			want := stdheap.Pop(ref).(*refNode)
+			if got, ok := h.Pop(); !ok || got != want.id {
 				t.Fatalf("seed %d draining: popped %d (%v), the reference %d",
 					seed, got, ok, want.id)
 			}
 		}
-		if _, ok := h.pop(); ok {
+		if _, ok := h.Pop(); ok {
 			t.Fatalf("seed %d: the heap popped past the reference's end", seed)
 		}
 	}
